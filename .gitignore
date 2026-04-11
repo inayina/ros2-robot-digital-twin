@@ -1,0 +1,55 @@
+# Local secrets
+firmware/esp32_microros_bridge/include/wifi_config.h
+
+# PlatformIO
+**/.pio/
+**/.venv/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/compile_commands.json
+
+# ROS 2 / colcon
+build/
+install/
+log/
+**/build/
+**/install/
+**/log/
+
+# STM32 generated build output
+**/*.elf
+**/*.map
+**/*.bin
+**/*.hex
+**/*.list
+**/*.o
+**/*.d
+
+# STM32Cube generated CMSIS folders that are not used by this build.
+# Keep Drivers/CMSIS/Device and Drivers/CMSIS/Include tracked.
+firmware/stm32_sensor_node/Drivers/CMSIS/Core/
+firmware/stm32_sensor_node/Drivers/CMSIS/Device/ST/STM32F4xx/Source/
+firmware/stm32_sensor_node/Drivers/CMSIS/Core_A/
+firmware/stm32_sensor_node/Drivers/CMSIS/DAP/
+firmware/stm32_sensor_node/Drivers/CMSIS/DSP/
+firmware/stm32_sensor_node/Drivers/CMSIS/Documentation/
+firmware/stm32_sensor_node/Drivers/CMSIS/NN/
+firmware/stm32_sensor_node/Drivers/CMSIS/RTOS/
+firmware/stm32_sensor_node/Drivers/CMSIS/RTOS2/
+
+# Editor and assistant local state
+**/.vscode/
+**/.idea/
+**/.codex
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Logs
