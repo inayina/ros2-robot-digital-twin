@@ -86,7 +86,7 @@ source install/local_setup.bash
 
 1.  **无线打通**：ESP32 成功在 P14s 的 micro-ROS Agent 上注册节点并发布测试 Topic。（已完成）
 2.  **协议联调**：STM32 发送 `IMUQ` / `State` 帧，ESP32 完整解析并发布 ROS 2 话题。（已完成）
-3.  **数据采集**：使用 `imu_data_logger` 采集 CSV/JSONL，形成训练与评估数据集。
+3.  **数据采集**：使用 `imu_data_logger` 采集 CSV/JSONL，形成训练与评估数据集。（已完成）
 4.  **模型部署**：将 `m2cgen` 转换的 C 算法代码刷入 STM32，验证本地 LED 响应速度。
 5.  **仿真闭环**：在 Gazebo 中加载模型，订阅 `/imu/filtered` 实现物理-数字同频。（已完成）
 
