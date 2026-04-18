@@ -5,7 +5,6 @@
 
 extern UART_HandleTypeDef huart1;
 extern osMessageQueueId_t SensorQueueHandle;
-extern osMessageQueueId_t FeatureQueueHandle;
 
 #define WINDOW_SIZE 10
 
@@ -97,18 +96,12 @@ void StartAlgTask(void *argument)
                 FeatureData_t features;
                 Extract_Features(buffer, WINDOW_SIZE, &features);
 
-                printf("State:%d RMS:%.2f\n", features.anomaly_state, features.filtered_rms);
-
                 // Send state to UART for ESP32
                 char state_buffer[32];
                 int state_len = snprintf(state_buffer, sizeof(state_buffer), "State:%d\n", features.anomaly_state);
                 HAL_UART_Transmit(&huart1, (uint8_t*)state_buffer, state_len, HAL_MAX_DELAY);
 
                 LED_Alarm_SetState(features.anomaly_state);
-
-                if (osMessageQueuePut(FeatureQueueHandle, &features, 0, 10) != osOK) {
-                    printf("FeatureQueue full or error, drop result\n");
-                }
 
                 index = 0;
             }

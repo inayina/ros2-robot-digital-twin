@@ -48,18 +48,11 @@
 /* USER CODE BEGIN Variables */
 
 /* USER CODE END Variables */
-/* Definitions for MicroROSTask */
-osThreadId_t MicroROSTaskHandle;
-const osThreadAttr_t MicroROSTask_attributes = {
-  .name = "MicroROSTask",
-  .stack_size = 1024 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
-};
 /* Definitions for SensorTask */
 osThreadId_t SensorTaskHandle;
 const osThreadAttr_t SensorTask_attributes = {
   .name = "SensorTask",
-  .stack_size = 256 * 4,
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityRealtime,
 };
 /* Definitions for AlgTask */
@@ -81,11 +74,6 @@ osMessageQueueId_t SensorQueueHandle;
 const osMessageQueueAttr_t SensorQueue_attributes = {
   .name = "SensorQueue"
 };
-/* Definitions for FeatureQueue */
-osMessageQueueId_t FeatureQueueHandle;
-const osMessageQueueAttr_t FeatureQueue_attributes = {
-  .name = "FeatureQueue"
-};
 /* Definitions for SensorSemaphore */
 osSemaphoreId_t SensorSemaphoreHandle;
 const osSemaphoreAttr_t SensorSemaphore_attributes = {
@@ -97,7 +85,6 @@ const osSemaphoreAttr_t SensorSemaphore_attributes = {
 
 /* USER CODE END FunctionPrototypes */
 
-void StartMicroROSTask(void *argument);
 void StartSensorTask(void *argument);
 void StartAlgTask(void *argument);
 void StartDefaultTask(void *argument);
@@ -134,17 +121,11 @@ void MX_FREERTOS_Init(void) {
   /* creation of SensorQueue */
   SensorQueueHandle = osMessageQueueNew (10, sizeof(SensorData_t), &SensorQueue_attributes);
 
-  /* creation of FeatureQueue */
-  FeatureQueueHandle = osMessageQueueNew (5, sizeof(FeatureData_t), &FeatureQueue_attributes);
-
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of MicroROSTask */
-  MicroROSTaskHandle = osThreadNew(StartMicroROSTask, NULL, &MicroROSTask_attributes);
-
   /* creation of SensorTask */
   SensorTaskHandle = osThreadNew(StartSensorTask, NULL, &SensorTask_attributes);
 
@@ -162,24 +143,6 @@ void MX_FREERTOS_Init(void) {
   /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
 
-}
-
-/* USER CODE BEGIN Header_StartMicroROSTask */
-/**
-  * @brief  Function implementing the MicroROSTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartMicroROSTask */
-__weak void StartMicroROSTask(void *argument)
-{
-  /* USER CODE BEGIN StartMicroROSTask */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartMicroROSTask */
 }
 
 /* USER CODE BEGIN Header_StartSensorTask */

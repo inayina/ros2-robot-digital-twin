@@ -46,8 +46,8 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     User/App/sensor_task.c
-    User/App/ros_bridge.c
     User/App/algo_task.c
+    User/App/attitude_estimator.c
     User/Bsp/mpu6050.c
     User/Bsp/led_alarm.c
 )

@@ -1,10 +1,4 @@
-这份 **Robot-State-Monitor (RSM) v2.7** 完整版项目白皮书，集成了你所有的核心需求：**双板架构**、**Wi-Fi 传输**、**数据双轨制（原始+滤波）**以及 **Native（原生）环境运行**。
-
-你可以直接将其作为项目的核心文档（`design.md`），指导后续所有开发工作。
-
----
-
-# 🤖 Project: Robot-State-Monitor (RSM) v2.7
+# Project: Robot-State-Monitor (RSM) V2
 **项目定位：** 基于嵌入式边缘计算与 ROS 2 数字孪生的无线监测系统
 **核心环境：** P14s (Ubuntu 24.04 + ROS 2 Jazzy Native)
 **硬件组合：** STM32F411CEU6 (计算核心) + ESP32 (无线网桥)
@@ -15,9 +9,9 @@
 
 系统由**感知推理、无线传输、数字孪生**三个维度构成：
 
-1.  **STM32 (Master)**：负责 100Hz 传感器采集、互补滤波算法、XGBoost 状态推理及本地 LED 报警。
-2.  **ESP32 (Bridge)**：通过串口接收 STM32 封装帧，利用 micro-ROS 将数据通过 Wi-Fi 发布至 PC 端。
-3.  **PC (Digital Twin)**：运行原生 micro-ROS Agent，实现数据录制（训练集）与 Gazebo 实时姿态同步。
+1.  **STM32 (Master)**：负责 100Hz MPU6050 采样、6 轴姿态解算、RMS 状态判别及本地 LED 报警。
+2.  **ESP32 (Bridge)**：通过串口接收 STM32 `IMUQ` / `State` 帧，利用 micro-ROS 将数据通过 Wi-Fi 发布至 PC 端。
+3.  **PC (Digital Twin)**：运行原生 micro-ROS Agent、Gazebo 数字孪生、数据记录和实时曲线分析节点。
 
 ---
 
@@ -44,9 +38,9 @@
 ### 3.1 STM32 端 (FreeRTOS)
 | 任务名称 | 优先级 | 功能描述 |
 | :--- | :--- | :--- |
-| **SensorTask** | 48 | 100Hz 采集传感器原始数据。 |
-| **AlgTask** | 32 | 1. **互补滤波**计算姿态四元数；2. **XGBoost** 识别运动状态。 |
-| **CommsTask** | 24 | 按协议打包 `[Raw + Filtered + Inference]` 帧，通过串口推给 ESP32。 |
+| **SensorTask** | 48 | 100Hz 采集 MPU6050，调用 `attitude_estimator` 解算四元数，并在 Gazebo/ROS 模式输出 `IMUQ`。 |
+| **AlgTask** | 32 | 基于滑动窗口 RMS 做状态判别，更新 LED 报警并输出 `State:x`。 |
+| **DefaultTask** | 24 | 翻转调试 LED，用于确认系统仍在运行。 |
 
 ### 3.2 ESP32 端 (PlatformIO/Arduino)
 * **任务**：解析串口帧，通过 `micro_ros_arduino` 发布话题。
@@ -59,11 +53,11 @@
 为了同时兼顾“模型训练”与“仿真稳定性”，数据在发送前进行分流：
 
 1.  **原始轨 (Raw Track)**：
-    * **数据内容**：未经过滤的 $accel$ 和 $gyro$ 原始数值。
-    * **目的**：发布至 `/imu/raw`，通过 `ros2 bag record` 录制，作为 P14s 上 Python 训练 XGBoost 的数据集。
+    * **数据内容**：STM32 输出的加速度、角速度和四元数姿态。
+    * **目的**：ESP32 发布至 `/imu/data`，供 `imu_data_logger` 记录和后续训练分析。
 2.  **滤波轨 (Filtered Track)**：
-    * **数据内容**：经过 STM32 互补滤波计算后的姿态角/四元数。
-    * **目的**：发布至 `/imu/filtered`，实时驱动 Gazebo 中的方块模型，确保仿真平滑无抖动。
+    * **数据内容**：ESP32 对线加速度和角速度做一阶低通滤波，姿态四元数保持 STM32 解算结果。
+    * **目的**：发布至 `/imu/filtered`，实时驱动 Gazebo 模型并提供更平滑的分析曲线。
 
 ---
 
@@ -83,25 +77,22 @@ source install/local_setup.bash
 ### 5.2 运行指令
 * **启动代理**：`ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888`
 * **防火墙放行**：`sudo ufw allow 8888/udp`
-* **录制数据**：`ros2 bag record /imu/raw`
+* **录制 rosbag**：`ros2 bag record /imu/data /imu/filtered /robot/state`
+* **记录 CSV/JSONL**：`ros2 run imu_data_logger imu_logger --ros-args -p output_dir:=./data/imu_run_001`
 
 ---
 
 ## 6. 开发 Roadmap (五阶段)
 
-1.  **无线打通**：ESP32 成功在 P14s 的 micro-ROS Agent 上注册节点并发布测试 Topic。
-2.  **协议联调**：STM32 发送封装帧，ESP32 能够完整解析并校验 CRC8。
-3.  **数据采集**：手持设备模拟不同状态，PC 录制数据并导出 CSV，完成 XGBoost 模型训练。
+1.  **无线打通**：ESP32 成功在 P14s 的 micro-ROS Agent 上注册节点并发布测试 Topic。（已完成）
+2.  **协议联调**：STM32 发送 `IMUQ` / `State` 帧，ESP32 完整解析并发布 ROS 2 话题。（已完成）
+3.  **数据采集**：使用 `imu_data_logger` 采集 CSV/JSONL，形成训练与评估数据集。
 4.  **模型部署**：将 `m2cgen` 转换的 C 算法代码刷入 STM32，验证本地 LED 响应速度。
-5.  **仿真闭环**：在 Gazebo 中加载模型，订阅 `/imu/filtered` 实现物理-数字同频。
+5.  **仿真闭环**：在 Gazebo 中加载模型，订阅 `/imu/filtered` 实现物理-数字同频。（已完成）
 
 ---
 
 ## 7. 避坑指南 (Critical Notes)
 * **内存管理**：ESP32 micro-ROS 默认缓冲区较小，若发布频率过高导致频繁掉线，需调整 `rmw_options`。
 * **浮点支持**：STM32 编译时务必开启 `-u _printf_float` 并在配置中选择 `Hard VFP`。
-* **频率同步**：ESP32 的发布频率建议略低于 STM32 的采样频率（如 50Hz），以缓解 Wi-Fi 传输压力。
-
----
-
-这份文档就是你后续工程的“导航图”。明天硬件到手后，建议先从 **Phase 1 (ESP32 Wi-Fi 通讯)** 开始，那是整条链路最容易卡壳的地方。需要针对具体的 ESP32 micro-ROS 代码配置进行深入讨论吗？
+* **频率同步**：ESP32 的发布频率建议略低于 STM32 的采样频率（如 50Hz），以缓解 Wi-Fi 传输压力

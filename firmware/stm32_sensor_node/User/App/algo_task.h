@@ -6,12 +6,12 @@
 
 extern osThreadId_t AlgTaskHandle;
 extern osMessageQueueId_t SensorQueueHandle;
-extern osMessageQueueId_t FeatureQueueHandle;
 
 /* 1. 传感器原始数据流 (52 Bytes) */
 typedef struct {
     float acc[3];           // 加速度 (ax, ay, az)
     float gyro[3];          // 陀螺仪 (gx, gy, gz)
+    float quat[4];          // 姿态四元数 (x, y, z, w)
     float mpu_temp;         // MPU内部温度
     float env_temp;         // (预留) AHT20
     float env_humid;        // (预留) AHT20

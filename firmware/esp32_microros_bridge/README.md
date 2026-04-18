@@ -9,10 +9,12 @@ ESP32-S3 DevKitC-1 作为 micro-ROS 客户端，通过 WiFi UDP 连接到 micro-
 - 通过 UART 接收 STM32 发送的 IMU 和状态数据
 - WiFi UDP 连接到 micro-ROS Agent，默认示例地址为 `192.168.1.8:8888`
 - 发布 ROS2 话题:
-  - `/imu/data` (sensor_msgs/Imu): IMU 数据
-  - `/imu/filtered` (sensor_msgs/Imu): 滤波后 IMU 数据，用于 Gazebo
+  - `/imu/data` (sensor_msgs/Imu): 原始 IMU 数据，兼容 `IMUQ` 四元数姿态
+  - `/imu/filtered` (sensor_msgs/Imu): 一阶低通滤波后的 IMU 数据，用于 Gazebo/分析
   - `/robot/state` (std_msgs/Int32): 机器人状态 (0-3)
 - micro-ROS 初始化前会 ping Agent，Agent 不可达时不会继续卡在 `rclc_support_init`
+- 启动后向 STM32 发送 `G`，请求 Gazebo/ROS 数据输出模式
+- 使用行缓冲解析 STM32 串口，避免 `readStringUntil()` 阻塞主循环
 
 ## 硬件连接
 
@@ -128,13 +130,19 @@ linear_acceleration:
 
 STM32 发送格式:
 
-- IMU: `IMU,ax,ay,az,gx,gy,gz,temp\n`
+- 首选 IMU: `IMUQ,ax,ay,az,gx,gy,gz,qx,qy,qz,qw,temp\n`
+- 兼容旧 IMU: `IMU,ax,ay,az,gx,gy,gz,temp\n`
 - State: `State:0\n` (0=正常, 1=警告, 2=警报, 3=严重)
+
+`IMUQ` 中的四元数会写入 `/imu/data.orientation`，`/imu/filtered` 保留同一姿态并只滤波线加速度和角速度。旧 `IMU` 格式没有姿态，orientation 使用单位四元数占位。
+
+训练 CSV 默认不会被当作 IMU 发布，避免把采集数据误送进 ROS 话题；如需临时兼容，可在 `src/main.cpp` 中打开 `ACCEPT_TRAIN_CSV_AS_IMU`。
 
 ## 故障排除
 
 - 如果串口出现 `~...XRCE...` 乱码，并且日志是 `Setting micro-ROS transports...`，说明 ESP32 仍在运行旧固件或 Serial transport 固件。重新上传后必须看到 `v1.1 WiFi-only`。
 - 如果只看到 `/parameter_events` 和 `/rosout`，说明 micro-ROS 节点没有成功注册到 ROS2。先确认 Agent 已启动，再看 ESP32 是否打印 `micro-ROS Agent reachable`。
+- 如果 `/robot/state` 有数据但 `/imu/data` 没数据，检查 STM32 是否处于 `G` 模式，并确认串口行是 `IMUQ,...` 或 `IMU,...`。
 - 如果 `/dev/ttyACM0` 消失，关闭串口监视器后重新插拔 ESP32。必要时按住 `BOOT`，点按 `RESET/EN`，松开 `BOOT` 后重新上传。
 - 更多排障记录见 `Debug.md`
 

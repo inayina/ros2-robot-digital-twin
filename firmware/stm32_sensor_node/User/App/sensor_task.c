@@ -1,5 +1,6 @@
 #include "sensor_task.h"
 #include "algo_task.h"
+#include "attitude_estimator.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -15,13 +16,16 @@ typedef enum {
 static OutputMode_t current_mode = OUTPUT_MODE_GAZEBO;
 static uint8_t train_label = 0;
 static uint8_t cmd_byte = 0;
+static AttitudeEstimator_t attitude_estimator;
 
 static void OutputGazebo(const SensorData_t *data)
 {
-    char buffer[96];
-    int len = snprintf(buffer, sizeof(buffer), "IMU,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n",
+    char buffer[192];
+    int len = snprintf(buffer, sizeof(buffer),
+                       "IMUQ,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.6f,%.6f,%.6f,%.6f,%.1f\n",
                        data->acc[0], data->acc[1], data->acc[2],
                        data->gyro[0], data->gyro[1], data->gyro[2],
+                       data->quat[0], data->quat[1], data->quat[2], data->quat[3],
                        data->mpu_temp);
     HAL_UART_Transmit(&huart1, (uint8_t*)buffer, len, HAL_MAX_DELAY);
 }
@@ -83,6 +87,8 @@ void StartSensorTask(void *argument)
 
   cmd_byte = 0;
   HAL_UART_Receive_IT(&huart1, &cmd_byte, 1);
+  AttitudeEstimator_Init(&attitude_estimator);
+  uint32_t last_tick = osKernelGetTickCount();
 
   for (;;)
   {
@@ -97,6 +103,18 @@ void StartSensorTask(void *argument)
     data.gyro[0] = raw_data.gx / 131.0f;
     data.gyro[1] = raw_data.gy / 131.0f;
     data.gyro[2] = raw_data.gz / 131.0f;
+
+    uint32_t now_tick = osKernelGetTickCount();
+    float dt = (float)(now_tick - last_tick) / 1000.0f;
+    last_tick = now_tick;
+    AttitudeEstimator_Update(&attitude_estimator,
+                             data.acc[0], data.acc[1], data.acc[2],
+                             data.gyro[0], data.gyro[1], data.gyro[2],
+                             dt);
+    data.quat[0] = attitude_estimator.q1;
+    data.quat[1] = attitude_estimator.q2;
+    data.quat[2] = attitude_estimator.q3;
+    data.quat[3] = attitude_estimator.q0;
 
     data.mpu_temp = raw_data.temperature;
     data.env_temp = 0;

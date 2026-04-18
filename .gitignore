@@ -51,5 +51,7 @@ Thumbs.db
 # Python
 __pycache__/
 *.py[cod]
+**/.pytest_cache/
 
 # Logs
+*.jsonl
