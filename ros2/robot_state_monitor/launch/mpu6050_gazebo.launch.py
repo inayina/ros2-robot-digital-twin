@@ -5,7 +5,6 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
-    SetEnvironmentVariable,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -23,9 +22,7 @@ def generate_launch_description():
     imu_topic = LaunchConfiguration('imu_topic')
     model_name = LaunchConfiguration('model_name')
     update_rate = LaunchConfiguration('update_rate')
-    use_imu_estimator = LaunchConfiguration('use_imu_estimator')
-    accel_correction = LaunchConfiguration('accel_correction')
-    gyro_deadband = LaunchConfiguration('gyro_deadband')
+    lock_yaw = LaunchConfiguration('lock_yaw')
 
     gazebo = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -58,15 +55,7 @@ def generate_launch_description():
             'imu_topic': imu_topic,
             'model_name': model_name,
             'update_rate': ParameterValue(update_rate, value_type=float),
-            'use_imu_estimator': ParameterValue(
-                use_imu_estimator,
-                value_type=bool
-            ),
-            'accel_correction': ParameterValue(
-                accel_correction,
-                value_type=float
-            ),
-            'gyro_deadband': ParameterValue(gyro_deadband, value_type=float),
+            'lock_yaw': ParameterValue(lock_yaw, value_type=bool),
         }],
     )
 
@@ -76,9 +65,7 @@ def generate_launch_description():
         DeclareLaunchArgument('imu_topic', default_value='/imu/filtered'),
         DeclareLaunchArgument('model_name', default_value='mpu6050'),
         DeclareLaunchArgument('update_rate', default_value='15.0'),
-        DeclareLaunchArgument('use_imu_estimator', default_value='true'),
-        DeclareLaunchArgument('accel_correction', default_value='0.04'),
-        DeclareLaunchArgument('gyro_deadband', default_value='0.015'),
+        DeclareLaunchArgument('lock_yaw', default_value='true'),
         gazebo,
         bridge,
         gazebo_bridge,

@@ -8,6 +8,8 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile
+from rclpy.qos import QoSReliabilityPolicy
 from rosidl_runtime_py.convert import message_to_ordereddict
 from rosidl_runtime_py.utilities import get_message
 from sensor_msgs.msg import Imu
@@ -174,7 +176,9 @@ class ImuLoggerNode(Node):
             message_type,
             self.robot_state_topic,
             partial(self._write_robot_state_message, topic_type=topic_type),
-            10)
+            QoSProfile(
+                depth=10,
+                reliability=QoSReliabilityPolicy.BEST_EFFORT))
         self._subscriptions.append(self._robot_state_subscription)
         self._robot_state_probe_timer.cancel()
         self.get_logger().info(

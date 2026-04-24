@@ -1,29 +1,21 @@
 # Robot State Monitor
 
-ROS 2 Jazzy package for visualizing the real MPU6050 stream in Gazebo Harmonic.
+用于在 Gazebo Harmonic 中可视化真实 MPU6050 数据流的 ROS 2 Jazzy 软件包。
 
-The package subscribes to `/imu/filtered`, spawns a visible `mpu6050` marker into Gazebo Sim, and updates the model pose through Gazebo Harmonic services. The launch files start `ros_gz_bridge parameter_bridge` so ROS 2 can call Gazebo Transport services.
+这个软件包会订阅 `/imu/filtered`，在 Gazebo Sim 中生成一个可见的 `mpu6050` 标记模型，并通过 Gazebo Harmonic 服务更新模型位姿。启动文件会启动 `ros_gz_bridge parameter_bridge`，让 ROS 2 可以调用 Gazebo Transport 服务。
 
-For the hardware demo, the Gazebo marker estimates roll/pitch/yaw from MPU6050 acceleration and angular velocity. This avoids relying on the placeholder quaternion currently published by the ESP32 firmware and makes the visible marker follow physical board tilt more clearly.
+硬件演示时，ESP32 固件会发布滤波后的姿态四元数。Gazebo bridge 在更新可见标记模型位姿前，会先归一化这个四元数。默认会锁定初始 yaw，这样 MPU6050 的陀螺仪漂移就不会让标记模型慢慢自转。
 
-## V1 Status
+## 目录结构
 
-V1 has been verified on the real ROS 2 link: STM32 sensor/state frames are forwarded by the ESP32-S3 micro-ROS bridge over WiFi UDP, received by the micro-ROS Agent, and exposed in ROS 2 Jazzy.
+- `robot_state_monitor/robot_gazebo_bridge.py`：把 `/imu/filtered` 桥接到 Gazebo 模型位姿更新的 ROS 2 节点
+- `models/mpu6050.sdf`：带 RGB 坐标轴条的可见静态 MPU6050 标记模型
+- `worlds/empty.sdf`：最小 Gazebo Harmonic world，包含物理、场景广播器和地面
+- `launch/mpu6050_gazebo.launch.py`：稳定的无头 Gazebo server、服务桥和位姿桥
+- `launch/mpu6050_gazebo_gui.launch.py`：Gazebo GUI、服务桥和位姿桥
+- `start_static.sh`：无头 smoke test 脚本
 
-Verified ROS 2 topics: `/imu/data`, `/imu/filtered`, and `/robot/state`. The Gazebo bridge consumes `/imu/filtered` and drives the visible MPU6050 marker in Gazebo Harmonic.
-
-This version is intended as the first complete hardware-to-digital-twin demo: live MPU6050 motion enters ROS 2, then Gazebo renders a synchronized orientation marker for debugging and demonstration.
-
-## Layout
-
-- `robot_state_monitor/robot_gazebo_bridge.py`: ROS 2 node that bridges `/imu/filtered` to Gazebo model pose updates
-- `models/mpu6050.sdf`: visible static MPU6050 marker with RGB axis bars
-- `worlds/empty.sdf`: minimal Gazebo Harmonic world with physics, scene broadcaster, and ground plane
-- `launch/mpu6050_gazebo.launch.py`: stable headless Gazebo server, service bridge, and pose bridge
-- `launch/mpu6050_gazebo_gui.launch.py`: Gazebo GUI, service bridge, and pose bridge
-- `start_static.sh`: headless smoke test script
-
-## Build
+## 构建
 
 ```bash
 cd /home/ina/ros2_ws
@@ -32,9 +24,9 @@ colcon build --packages-select robot_state_monitor
 source install/setup.bash
 ```
 
-## Run Headless First
+## 先运行无头模式
 
-Use this path to verify that Gazebo services, model spawning, and the bridge are working without involving GUI rendering.
+先用这个流程验证 Gazebo 服务、模型生成和 bridge 是否正常工作，不引入 GUI 渲染问题。
 
 ```bash
 cd /home/ina/ros2_ws
@@ -43,64 +35,40 @@ source install/setup.bash
 ros2 launch robot_state_monitor mpu6050_gazebo.launch.py
 ```
 
-In another terminal, verify the model exists in Gazebo:
+在另一个终端中确认模型已经存在于 Gazebo：
 
 ```bash
 gz topic -e -t /world/default/pose/info | grep mpu6050
 ```
 
-Publish a static orientation if the real ESP32/micro-ROS stream is not running:
+如果真实 ESP32/micro-ROS 数据流还没有运行，可以发布一个静态姿态：
 
 ```bash
 ros2 topic pub --once /imu/filtered sensor_msgs/msg/Imu "{orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}"
 ```
 
-## Hardware Demo
+## 硬件演示
 
-Start the micro-ROS Agent first:
-
-```bash
-cd /home/ina/microros_ws
-source /opt/ros/jazzy/setup.bash
-./build/micro_ros_agent/micro_ros_agent udp4 --port 8888 -v 6
-```
-
-Then start or reset the ESP32-S3 micro-ROS bridge firmware. The firmware should report that the Agent is reachable and that micro-ROS is connected.
-
-In another terminal, confirm the live ROS 2 stream:
+先启动 micro-ROS Agent 和 ESP32，然后确认 IMU 数据流已经在线：
 
 ```bash
-source /opt/ros/jazzy/setup.bash
 ros2 topic list | grep imu
 ros2 topic echo --once /imu/filtered
-ros2 topic echo --once /robot/state
 ```
 
-Build and source this package if it has not already been built:
+然后启动 Gazebo：
 
 ```bash
-cd /home/ina/ros2_ws
-source /opt/ros/jazzy/setup.bash
-colcon build --packages-select robot_state_monitor
-source install/setup.bash
-```
-
-Then launch the headless Gazebo demo:
-
-```bash
-cd /home/ina/ros2_ws
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
 ros2 launch robot_state_monitor mpu6050_gazebo.launch.py
 ```
 
-The marker should rotate when the real MPU6050 board tilts. Position is intentionally fixed at `(x, y, z)` because raw MPU6050 acceleration is not reliable for world-position tracking without extra localization.
+真实 MPU6050 板子倾斜时，标记模型应该跟着旋转。位置会故意固定在 `(x, y, z)`，因为没有额外定位信息时，原始 MPU6050 加速度不适合用来可靠地跟踪世界坐标位置。
 
-Yaw can drift over time because MPU6050 has no magnetometer. Roll and pitch should be the most stable axes for demonstration.
+默认会锁定 yaw，因为 MPU6050 没有磁力计修正。演示时 roll 和 pitch 应该是最稳定的两个轴。
 
-## Run With GUI
+## 使用 GUI 运行
 
-After the headless path works, try the GUI launch:
+无头模式确认正常后，再尝试 GUI 启动：
 
 ```bash
 cd /home/ina/ros2_ws
@@ -109,15 +77,15 @@ source install/setup.bash
 ros2 launch robot_state_monitor mpu6050_gazebo_gui.launch.py
 ```
 
-If the GUI flashes and exits because of EGL/NVIDIA rendering, keep the headless launch running and attach the GUI separately:
+如果 GUI 因为 EGL/NVIDIA 渲染问题闪退，可以保持无头启动继续运行，然后单独连接 GUI：
 
 ```bash
 gz sim -g --render-engine-gui ogre
 ```
 
-## Expected ROS 2 Topics
+## 预期的 ROS 2 Topic
 
-With the ESP32 micro-ROS node running, these topics should exist:
+ESP32 micro-ROS 节点运行时，应该能看到这些 topic：
 
 ```text
 /imu/data
@@ -125,13 +93,13 @@ With the ESP32 micro-ROS node running, these topics should exist:
 /robot/state
 ```
 
-The Gazebo bridge uses `/imu/filtered` by default. To use another topic:
+Gazebo bridge 默认使用 `/imu/filtered`，并使用 `best_effort` QoS 订阅，以匹配硬件 IMU 数据流。如果要使用其他 topic：
 
 ```bash
 ros2 launch robot_state_monitor mpu6050_gazebo.launch.py imu_topic:=/imu/data
 ```
 
-## Useful Checks
+## 常用检查命令
 
 ```bash
 ros2 node list | grep gazebo_bridge
@@ -140,9 +108,9 @@ gz topic -l | grep /world/default
 gz topic -e -t /world/default/pose/info | grep mpu6050
 ```
 
-Do not use `ros2 topic echo /world/default/pose` unless you have explicitly bridged that Gazebo topic into ROS 2. In Gazebo Harmonic, `/world/default/pose/info` is a Gazebo Transport topic, not a ROS 2 topic by default.
+不要使用 `ros2 topic echo /world/default/pose`，除非你已经明确把这个 Gazebo topic 桥接到了 ROS 2。在 Gazebo Harmonic 中，`/world/default/pose/info` 默认是 Gazebo Transport topic，不是 ROS 2 topic。
 
-If `gz topic -e -t /world/default/pose/info | grep mpu6050` has no output, check that all three processes are running:
+如果 `gz topic -e -t /world/default/pose/info | grep mpu6050` 没有输出，检查下面三个进程是否都在运行：
 
 ```bash
 ros2 node list | grep gazebo_service_bridge
@@ -150,20 +118,12 @@ ros2 node list | grep gazebo_bridge
 pgrep -a gz
 ```
 
-## Parameters
+## 参数
 
-- `world_name`: Gazebo world name, default `default`
-- `imu_topic`: IMU topic to subscribe, default `/imu/filtered`
-- `model_name`: Gazebo entity name, default `mpu6050`
-- `model_file`: optional custom SDF path
-- `x`, `y`, `z`: spawn and update position, default `(0.0, 0.0, 0.35)`
-- `update_rate`: pose update rate, default `15.0`
-- `use_imu_estimator`: estimate orientation from acceleration and gyro, default `true`
-- `accel_correction`: complementary-filter accelerometer correction, default `0.04`
-- `gyro_deadband`: ignore small gyro noise below this value, default `0.015`
-
-To use the quaternion from the ROS message instead of estimating orientation in the bridge:
-
-```bash
-ros2 launch robot_state_monitor mpu6050_gazebo.launch.py use_imu_estimator:=false
-```
+- `world_name`：Gazebo world 名称，默认 `default`
+- `imu_topic`：要订阅的 IMU topic，默认 `/imu/filtered`
+- `model_name`：Gazebo entity 名称，默认 `mpu6050`
+- `model_file`：可选的自定义 SDF 路径
+- `x`, `y`, `z`：生成和更新时使用的位置，默认 `(0.0, 0.0, 0.35)`
+- `update_rate`：位姿更新频率，默认 `15.0`
+- `lock_yaw`：保持初始 yaw 固定，避免陀螺仪漂移导致自转，默认 `true`

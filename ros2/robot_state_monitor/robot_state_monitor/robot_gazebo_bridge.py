@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
-from math import atan2, cos, sin, sqrt
+from math import asin, atan2, cos, sin, sqrt
 from pathlib import Path
 
 import rclpy
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, Quaternion
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from ros_gz_interfaces.msg import Entity, EntityFactory
 from ros_gz_interfaces.srv import SetEntityPose, SpawnEntity
 from sensor_msgs.msg import Imu
@@ -24,9 +25,7 @@ class GazeboBridge(Node):
         self.declare_parameter('y', 0.0)
         self.declare_parameter('z', 0.35)
         self.declare_parameter('update_rate', 15.0)
-        self.declare_parameter('use_imu_estimator', True)
-        self.declare_parameter('accel_correction', 0.04)
-        self.declare_parameter('gyro_deadband', 0.015)
+        self.declare_parameter('lock_yaw', True)
 
         self.model_name = self.get_parameter('model_name').value
         self.world_name = self.get_parameter('world_name').value
@@ -36,17 +35,8 @@ class GazeboBridge(Node):
             float(self.get_parameter('y').value),
             float(self.get_parameter('z').value),
         )
-        self.use_imu_estimator = bool(
-            self.get_parameter('use_imu_estimator').value
-        )
-        self.accel_correction = float(
-            self.get_parameter('accel_correction').value
-        )
-        self.gyro_deadband = float(self.get_parameter('gyro_deadband').value)
-        self.roll = 0.0
-        self.pitch = 0.0
-        self.yaw = 0.0
-        self.last_imu_time = None
+        self.lock_yaw_enabled = bool(self.get_parameter('lock_yaw').value)
+        self.yaw_reference = None
 
         self.spawn_client = self.create_client(
             SpawnEntity,
@@ -61,21 +51,27 @@ class GazeboBridge(Node):
         self.spawn_model()
 
         imu_topic = self.get_parameter('imu_topic').value
+        imu_qos = QoSProfile(
+            depth=20,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+        )
         self.subscription = self.create_subscription(
             Imu,
             imu_topic,
             self.imu_callback,
-            20
+            imu_qos
         )
 
         self.latest_orientation = None
+        self.warned_invalid_orientation = False
         self.request_in_flight = False
         update_rate = float(self.get_parameter('update_rate').value)
         self.timer = self.create_timer(1.0 / update_rate, self.push_model_state)
 
-        mode = 'IMU estimator' if self.use_imu_estimator else 'message quaternion'
         self.get_logger().info(
-            f'Gazebo bridge node started: {imu_topic} -> {self.model_name} ({mode})'
+            f'Gazebo bridge node started: {imu_topic} -> {self.model_name} '
+            f'(message quaternion, qos=best_effort, '
+            f'lock_yaw={self.lock_yaw_enabled})'
         )
 
     def resolve_model_file(self):
@@ -141,55 +137,47 @@ class GazeboBridge(Node):
             )
 
     def imu_callback(self, msg):
-        if self.use_imu_estimator:
-            self.latest_orientation = self.estimate_orientation(msg)
-            return
-
         q = msg.orientation
         norm = sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w)
         if norm < 1e-6:
+            if not self.warned_invalid_orientation:
+                self.get_logger().warn(
+                    'Ignoring IMU message with invalid orientation quaternion.'
+                )
+                self.warned_invalid_orientation = True
             return
 
-        q.x /= norm
-        q.y /= norm
-        q.z /= norm
-        q.w /= norm
-        self.latest_orientation = q
+        orientation = Quaternion(
+            x=q.x / norm,
+            y=q.y / norm,
+            z=q.z / norm,
+            w=q.w / norm,
+        )
+        if self.lock_yaw_enabled:
+            orientation = self.with_locked_yaw(orientation)
 
-    def estimate_orientation(self, msg):
-        now = self.get_clock().now().nanoseconds * 1e-9
-        if self.last_imu_time is None:
-            dt = 0.02
-        else:
-            dt = max(0.001, min(0.1, now - self.last_imu_time))
-        self.last_imu_time = now
+        self.latest_orientation = orientation
 
-        gx = self.apply_deadband(msg.angular_velocity.x)
-        gy = self.apply_deadband(msg.angular_velocity.y)
-        gz = self.apply_deadband(msg.angular_velocity.z)
+    def with_locked_yaw(self, q):
+        roll, pitch, yaw = self.quaternion_to_euler(q)
+        if self.yaw_reference is None:
+            self.yaw_reference = yaw
 
-        self.roll += gx * dt
-        self.pitch += gy * dt
-        self.yaw += gz * dt
+        return self.euler_to_quaternion(roll, pitch, self.yaw_reference)
 
-        ax = msg.linear_acceleration.x
-        ay = msg.linear_acceleration.y
-        az = msg.linear_acceleration.z
-        accel_norm = sqrt(ax * ax + ay * ay + az * az)
+    def quaternion_to_euler(self, q):
+        sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z)
+        cosr_cosp = 1.0 - 2.0 * (q.x * q.x + q.y * q.y)
+        roll = atan2(sinr_cosp, cosr_cosp)
 
-        if accel_norm > 1e-3:
-            accel_roll = atan2(ay, az)
-            accel_pitch = atan2(-ax, sqrt(ay * ay + az * az))
-            alpha = max(0.0, min(1.0, self.accel_correction))
-            self.roll = (1.0 - alpha) * self.roll + alpha * accel_roll
-            self.pitch = (1.0 - alpha) * self.pitch + alpha * accel_pitch
+        sinp = 2.0 * (q.w * q.y - q.z * q.x)
+        sinp = max(-1.0, min(1.0, sinp))
+        pitch = asin(sinp)
 
-        return self.euler_to_quaternion(self.roll, self.pitch, self.yaw)
-
-    def apply_deadband(self, value):
-        if abs(value) < self.gyro_deadband:
-            return 0.0
-        return value
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = atan2(siny_cosp, cosy_cosp)
+        return roll, pitch, yaw
 
     def euler_to_quaternion(self, roll, pitch, yaw):
         half_roll = roll * 0.5
@@ -203,12 +191,12 @@ class GazeboBridge(Node):
         cy = cos(half_yaw)
         sy = sin(half_yaw)
 
-        q = Pose().orientation
-        q.w = cr * cp * cy + sr * sp * sy
-        q.x = sr * cp * cy - cr * sp * sy
-        q.y = cr * sp * cy + sr * cp * sy
-        q.z = cr * cp * sy - sr * sp * cy
-        return q
+        return Quaternion(
+            x=sr * cp * cy - cr * sp * sy,
+            y=cr * sp * cy + sr * cp * sy,
+            z=cr * cp * sy - sr * sp * cy,
+            w=cr * cp * cy + sr * sp * sy,
+        )
 
     def push_model_state(self):
         if self.latest_orientation is None or self.request_in_flight:
@@ -243,9 +231,17 @@ class GazeboBridge(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GazeboBridge()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
