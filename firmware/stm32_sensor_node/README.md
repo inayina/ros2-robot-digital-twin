@@ -11,7 +11,13 @@
 2. ESP32（Bridge）：串口收包 + Wi-Fi + micro-ROS 发布
 3. PC（Digital Twin）：micro-ROS Agent、数据录制、Gazebo 同步
 
-当前代码处于 **STM32 + ESP32 micro-ROS 桥接已联调成功** 阶段。
+当前代码处于 **STM32 + ESP32 micro-ROS 双向链路已联调成功** 阶段。
+
+电机控制当前已经完成 **TB6612 A 路单电机执行链路**：
+
+1. `/cmd_vel -> ESP32 -> STM32 -> TB6612 A 路` 已打通
+2. 电机物理转动已现场确认
+3. **B 路** 引脚仍作为后续双轮小车扩展位保留
 
 ## 当前实现状态（以代码为准）
 
@@ -26,22 +32,29 @@
    - 黄色 (TIM_CHANNEL_3)：警告状态闪烁
    - 红色 (TIM_CHANNEL_2)：警报闪烁，严重常亮
 3. 串口交互与双模式输出
-   - `GAZEBO`：输出 `IMUQ,ax,ay,az,gx,gy,gz,qx,qy,qz,qw,temp`
+   - `GAZEBO`：主格式输出 `IMUQ,ax,ay,az,gx,gy,gz,qx,qy,qz,qw,temp`
    - `TRAIN`：输出 `timestamp + 6轴 + label` 的 CSV
 4. 启动期 I2C 设备探测
    - 启动时打印 I2C 状态和 MPU6050 `WHO_AM_I`
-5. **Gazebo 数字孪生桥接**
+5. **TB6612 单电机执行链路**
+   - `MotorTask` 已创建并运行
+   - `TIM3_CH1 + AIN1/AIN2 + STBY` 已接入 TB6612 A 路
+   - `CMDVEL` 已可映射成 PWM / 方向输出
+   - 超时急停与 `STBY` 禁能已在 STM32 执行层实现
+6. **Gazebo 数字孪生桥接**
    - 订阅 `/imu/filtered` 话题
    - 通过 Gazebo 服务更新模型姿态
    - 实现机器人运动的可视化同步
-6. **micro-ROS 版本匹配**
+7. **micro-ROS 版本匹配**
    - ESP32 和 Agent 均使用 jazzy 版本
 
 未完成（设计目标已定义）：
 
-1. AHT20/BMP280 接入
-2. XGBoost 嵌入式推理替换当前 RMS 阈值基线
-3. 更完整的数据集采集、训练和评估流程
+1. 原始轨 `/imu/raw` 与滤波轨 `/imu/filtered` 的正式 ROS 2 发布
+2. AHT20/BMP280 接入
+3. XGBoost 嵌入式推理替换当前 RMS 阈值基线
+4. PC 端数字孪生与 Gazebo 同步
+5. 双电机差速小车扩展
 
 ## 代码结构
 
@@ -61,7 +74,7 @@ design.md              # 项目总体设计白皮书
 
 ## ESP32 micro-ROS 桥接项目
 
-位于 `../esp32_microros_bridge/` 目录，使用 PlatformIO + Arduino 框架。
+位于 `../microros_node/` 目录，使用 PlatformIO + Arduino 框架。
 
 ### 主要组件
 - `src/main.cpp`：Wi-Fi 连接、UART 接收 STM32 数据、micro-ROS 初始化和发布
@@ -73,7 +86,7 @@ design.md              # 项目总体设计白皮书
 - ESP32 Wi-Fi 连接到 micro-ROS Agent (192.168.1.8:8888)
 
 ### 运行步骤
-1. 启动 Agent：`./build/micro_ros_agent/micro_ros_agent udp4 --port 8888`
+1. 启动 Agent：`ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888`
 2. 上传 ESP32：`pio run --target upload`
 3. 查看话题：`ros2 topic list` 显示 `/imu/data` 和 `/robot/state`
 
@@ -170,12 +183,12 @@ Gazebo/ROS 模式下，STM32 输出带姿态四元数的 `IMUQ` 行：
 IMUQ,ax,ay,az,gx,gy,gz,qx,qy,qz,qw,temp
 ```
 
-ESP32 `esp32_microros_bridge` 已兼容该格式，并会把 `qx,qy,qz,qw` 写入 ROS `/imu/data` 和 `/imu/filtered` 的 `orientation` 字段。旧格式 `IMU,ax,ay,az,gx,gy,gz,temp` 仍可兼容，但旧格式没有真实姿态，只会使用单位四元数占位。
+ESP32 `microros_node` 已兼容该格式，并会把 `qx,qy,qz,qw` 写入 ROS `/imu/data` 和 `/imu/filtered` 的 `orientation` 字段。旧格式 `IMU,ax,ay,az,gx,gy,gz,temp` 仍可兼容，但旧格式没有真实姿态，只会使用单位四元数占位。
 
 ## 硬件连接（当前 STM32 部分）
 
 1. `I2C1`（PB6/PB7）连接 MPU6050（地址 `0x68`）
-2. `USART1`（PA9/PA10）用于日志与后续 ESP32 通讯
+2. `USART1`（PA9/PA10）用于与 ESP32 的双向通讯和当前日志输出
 3. `TIM2_CH2`（PA1）驱动报警 LED PWM
 4. 调试 LED：`DEBUG_LED`
 
@@ -210,7 +223,7 @@ cmake --build --preset Debug
 ### ESP32 编译
 
 ```bash
-cd ../esp32_microros_bridge
+cd ../microros_node
 pio run
 pio run --target upload
 ```
@@ -223,19 +236,20 @@ pio run --target upload
 4. 切换 `T/G` 后输出格式变化
 5. 运动状态变化时 LED 亮度随 `anomaly_state` 变化
 6. **ESP32 桥接**: 连接 Wi-Fi 后发布 ROS 话题
+7. **下行电机链路**: `ros2 topic pub /cmd_vel ...` 后，TB6612 A 路已可驱动电机物理转动
 
 ## 与 design.md 的对应关系
 
 1. 已落地：STM32 采样 + 算法 + 报警主链路
 2. 已落地：ESP32 Wi-Fi + micro-ROS 桥接
-3. 已落地：ESP32 micro-ROS 网桥、PC Agent、ROS 2 话题和 Gazebo 可视化闭环
-4. 已落地：训练数据输出接口（串口 CSV）
-5. 已新增：PC 端 `imu_data_logger` 数据记录和实时分析节点
+3. 已落地：TB6612 A 路单电机执行链路
+4. 部分落地：训练数据输出接口（串口 CSV）
+5. 待继续扩展：双电机、执行反馈、Gazebo 深度联动
 
 ## Roadmap（建议）
 
-1. Phase 1：接入 ESP32 串口解析与 UDP/Wi-Fi micro-ROS 发布（已完成）
-2. Phase 2：发布 `/imu/data` 与 `/imu/filtered`，并写入姿态四元数（已完成）
-3. Phase 3：将 `sensor_status/process_time` 真实化，完善错误处理
-4. Phase 4：部署 XGBoost C 推理代码，替换 RMS 基线
-5. Phase 5：完善 rosbag/CSV 数据集采集和算法评估
+1. Phase 1：保持当前双向最小闭环稳定
+2. Phase 2：补 `/motor/state` 或其他执行反馈接口
+3. Phase 3：启用 B 路并扩展到双电机差速
+4. Phase 4：将 `sensor_status/process_time` 真实化，完善错误处理
+5. Phase 5：部署 XGBoost C 推理代码，继续 Gazebo / rosbag 数据流建设

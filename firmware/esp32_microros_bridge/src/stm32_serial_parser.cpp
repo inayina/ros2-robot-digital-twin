@@ -6,9 +6,11 @@
 
 STM32SerialParser::STM32SerialParser(STM32ImuSampleCallback imu_callback,
                                      STM32StateCallback state_callback,
+                                     STM32DebugLineCallback debug_callback,
                                      bool accept_train_csv_as_imu)
     : imu_callback_(imu_callback),
       state_callback_(state_callback),
+      debug_callback_(debug_callback),
       accept_train_csv_as_imu_(accept_train_csv_as_imu),
       line_len_(0),
       imu_frame_count_(0),
@@ -86,6 +88,10 @@ bool STM32SerialParser::parseFrame(const char* line) {
         return false;
     }
 
+    if (strncmp(line, "DBG:", 4) == 0) {
+        return publishDebugLine(line + 4);
+    }
+
     return false;
 }
 
@@ -157,5 +163,14 @@ bool STM32SerialParser::publishState(int32_t state) {
 
     state_callback_(state);
     state_frame_count_++;
+    return true;
+}
+
+bool STM32SerialParser::publishDebugLine(const char* line) {
+    if (debug_callback_ == NULL) {
+        return false;
+    }
+
+    debug_callback_(line);
     return true;
 }

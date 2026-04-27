@@ -2,90 +2,92 @@
 
 基于 STM32、ESP32 micro-ROS、ROS 2 Jazzy 和 Gazebo Harmonic 的无线 IMU 状态监测与数字孪生项目。
 
-这个发布版已经整理并同步了当前工作区里的关键改动，包含：
+这个整合仓库已经同步到当前联调版本，当前系统分成三层：
 
-- STM32 输出四元数姿态帧和状态帧
-- ESP32 micro-ROS 桥接固件的串口解析/发布模块化重构
-- Gazebo 可视化桥接改为直接使用消息四元数，并默认锁定初始 yaw
-- `imu_data_logger` 针对 `/robot/state` 的 `BEST_EFFORT` 订阅兼容性修复
-
-## 当前集成状态
-
-- STM32 侧负责 MPU6050 采样、姿态解算、状态判别和串口输出
-- ESP32-S3 通过 WiFi UDP 连接 micro-ROS Agent，发布：
-  - `/imu/data`
-  - `/imu/filtered`
-  - `/robot/state`
-- `/imu/filtered` 对线加速度和角速度做一阶低通滤波，并保留输入帧中的四元数姿态
-- `robot_state_monitor` 在 Gazebo Harmonic 中生成可见的 `mpu6050` 标记模型，并根据 `/imu/filtered` 更新姿态
-- `imu_data_logger` 支持 CSV、JSONL 记录和原始/滤波 IMU 的实时曲线对比
+- STM32F411：100 Hz 采样 MPU6050，完成 6 轴姿态解算、窗口 RMS 状态判别、LED 报警，以及 `CMDVEL` 解析和 TB6612 A 路执行
+- ESP32-S3：通过 UART 解析 STM32 文本帧，通过 WiFi UDP 建立 micro-ROS 链路，发布 `/imu/data`、`/imu/filtered`、`/robot/state`，并订阅 `/cmd_vel`
+- ROS 2 Jazzy：提供 Gazebo Harmonic 数字孪生、IMU CSV/状态 JSONL 记录，以及 raw/filtered 实时曲线可视化
 
 ## 仓库结构
 
 ```text
 firmware/
-  stm32_sensor_node/          # STM32F411 + FreeRTOS + MPU6050 + 姿态/状态输出
-  esp32_microros_bridge/      # ESP32-S3 PlatformIO micro-ROS 桥接固件
+  stm32_sensor_node/          # STM32F411 + FreeRTOS + MPU6050 + 状态识别 + 电机执行
+  esp32_microros_bridge/      # ESP32-S3 PlatformIO micro-ROS 网桥
 ros2/
   robot_state_monitor/        # Gazebo Harmonic 可视化桥接包
   imu_data_logger/            # ROS 2 Python 记录与实时绘图包
 docs/
-  resume-bullets.md           # 简历项目描述草稿
+  resume-bullets.md
+  data-flow.md              # 当前数据流与话题/串口关系
 ```
 
-## 这次整理同步了什么
+## 当前数据流
 
-### `firmware/esp32_microros_bridge`
+完整说明见 `docs/data-flow.md`。这里先放一版当前主链路总览：
 
-- 将串口协议解析拆分到 `src/stm32_serial_parser.cpp`
-- 将 micro-ROS 发布逻辑拆分到 `src/uros_pub.cpp`
-- `main.cpp` 只保留 WiFi、任务调度、调试输出和模块组装
-- 发布端改为 `best_effort` QoS，更贴近传感器流场景
+```text
+启动协商
+ESP32 上电
+  -> UART "G\n"
+  -> STM32 切到 GAZEBO 模式
 
-### `ros2/robot_state_monitor`
+上行观测链路
+MPU6050
+  -> STM32 SensorTask (100 Hz 采样 + 6轴姿态解算)
+  -> IMUQ,ax,ay,az,gx,gy,gz,qx,qy,qz,qw,temp  (~50 Hz, UART 921600)
+  -> ESP32 stm32_serial_parser
+  -> /imu/data      (best_effort)
+  -> 一阶低通 alpha=0.2
+  -> /imu/filtered  (best_effort)
+  -> robot_state_monitor / imu_data_logger
 
-- Gazebo bridge 明确使用 `BEST_EFFORT` QoS 订阅硬件 IMU
-- 不再在桥接节点内做姿态估算，直接使用消息中的四元数
-- 增加 `lock_yaw` 参数，默认锁定初始 yaw，减轻 MPU6050 漂移带来的慢速自转
-- `README.md` 和 `Debug.md` 已同步到当前工作区描述
+状态判别链路
+STM32 SensorQueue
+  -> AlgTask (10 样本窗口 RMS 基线)
+  -> State:<n>  (~10 Hz)
+  -> ESP32 stm32_serial_parser
+  -> /robot/state  (best_effort)
+  -> imu_data_logger
 
-### `ros2/imu_data_logger`
+下行控制链路
+ROS 2 /cmd_vel (geometry_msgs/Twist, ESP32 侧 reliable subscriber)
+  -> ESP32 subscriber / executor
+  -> CMDVEL,<linear_x>,<angular_z>\n
+  -> STM32 UART 行解析
+  -> MotorTask (10 ms 调度, 200 ms 超时急停)
+  -> TB6612 A 路单电机
+```
 
-- `imu_logger` 对动态发现的 `/robot/state` 订阅显式使用 `QoSProfile(depth=10, reliability=BEST_EFFORT)`
-- `README.md` 已补充记录方式、输出文件格式和绘图参数说明
+## 当前接口
+
+- `STM32 -> ESP32`：`IMUQ,...`、`IMU,...`（兼容旧格式）、`State:<n>`、`DBG:...`
+- `ESP32 -> STM32`：`CMDVEL,<linear_x>,<angular_z>\n`
+- ROS 2 话题：
+  - `/imu/data`：`sensor_msgs/msg/Imu`，`best_effort`
+  - `/imu/filtered`：`sensor_msgs/msg/Imu`，`best_effort`
+  - `/robot/state`：`std_msgs/msg/Int32`，`best_effort`
+  - `/cmd_vel`：`geometry_msgs/msg/Twist`，ESP32 侧默认 `reliable` 订阅
 
 ## 快速开始
 
 ### 1. 配置 ESP32 本地 WiFi
-
-真实 WiFi 凭据不要提交到 Git。先复制示例文件：
 
 ```bash
 cd firmware/esp32_microros_bridge
 cp include/wifi_config.example.h include/wifi_config.h
 ```
 
-然后编辑 `include/wifi_config.h`：
-
-```cpp
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASS "YOUR_WIFI_PASSWORD"
-#define AGENT_IP "192.168.1.8"
-#define AGENT_PORT 8888
-```
-
-如果 Agent IP 变化，也同步修改 `platformio.ini` 里的
-`CONFIG_MICRO_ROS_TRANSPORT_UDP_NAME` 和 `CONFIG_MICRO_ROS_TRANSPORT_UDP_PORT`。
+编辑 `include/wifi_config.h`，填入你当前网络的 SSID、密码和 Agent 地址。真实凭据不要提交到 Git。
 
 ### 2. 启动 micro-ROS Agent
 
 ```bash
-cd /home/ina/microros_ws
 source /opt/ros/jazzy/setup.bash
-./build/micro_ros_agent/micro_ros_agent udp4 --port 8888 -v 6
+ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
 ```
 
-### 3. 构建并上传 ESP32 固件
+### 3. 构建并上传 ESP32
 
 ```bash
 cd firmware/esp32_microros_bridge
@@ -98,12 +100,15 @@ python3 -m platformio device monitor -b 921600 --port /dev/ttyACM0
 
 ```text
 ESP32-S3 micro-ROS Bridge v1.1 WiFi-only - Starting...
+STM32 Serial initialized
 Requested STM32 GAZEBO mode
-Setting micro-ROS WiFi transports...
-Pinging micro-ROS Agent over WiFi UDP...
-micro-ROS Agent reachable
+WiFi Connected! IP: ...
+micro-ROS WiFi transport configured
+Connecting to micro-ROS Agent at ...:8888
 micro-ROS connected!
 ```
+
+如果需要重新编译或烧录 STM32 固件，见 `firmware/stm32_sensor_node/README.md`。
 
 ### 4. 构建 ROS 2 包
 
@@ -114,52 +119,44 @@ colcon build --packages-select robot_state_monitor imu_data_logger
 source install/setup.bash
 ```
 
-### 5. 验证 ROS 2 数据流
+### 5. 验证数据流
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-ros2 topic list | grep imu
 ros2 topic echo --once /imu/data
 ros2 topic echo --once /imu/filtered
 ros2 topic echo --once /robot/state
+ros2 topic info -v /cmd_vel
 ```
 
-### 6. 记录数据
+### 6. 记录数据或启动 Gazebo
+
+记录：
 
 ```bash
 ros2 run imu_data_logger imu_logger --ros-args -p output_dir:=./data/imu_run_001
 ```
 
-### 7. 启动 Gazebo 数字孪生
-
-先跑无头模式：
+Gazebo：
 
 ```bash
 ros2 launch robot_state_monitor mpu6050_gazebo.launch.py
 ```
 
-确认模型已经生成：
-
-```bash
-gz topic -e -t /world/default/pose/info | grep mpu6050
-```
-
-GUI 需要时再启动：
-
-```bash
-ros2 launch robot_state_monitor mpu6050_gazebo_gui.launch.py
-```
-
 ## 重要说明
 
-- `robot_state_monitor` 默认以 `best_effort` 订阅 `/imu/filtered`，用于匹配硬件端传感器流 QoS
-- Gazebo bridge 默认 `lock_yaw:=true`；如果你想让 yaw 跟随消息里的值，可以在 launch 时传 `lock_yaw:=false`
-- ESP32 固件默认不把训练 CSV 当作 IMU 帧发布；如需临时兼容，可在 `firmware/esp32_microros_bridge/src/main.cpp` 中把 `ACCEPT_TRAIN_CSV_AS_IMU` 改成 `true`
-- 如果 Gazebo GUI 因 EGL/NVIDIA 问题闪退，优先使用无头模式验证链路
+- `robot_state_monitor` 默认以 `best_effort` 订阅 `/imu/filtered`
+- Gazebo bridge 默认 `lock_yaw:=true`
+- `/imu/filtered` 只对线加速度和角速度做一阶低通，保留 STM32 原始姿态四元数
+- ESP32 默认不把训练 CSV 当作正式 IMU 输入
+- 当前默认不在运行态周期性 `ping` Agent
 
 ## 相关文档
 
+- `docs/data-flow.md`
 - `firmware/stm32_sensor_node/README.md`
+- `firmware/stm32_sensor_node/design.md`
 - `firmware/esp32_microros_bridge/README.md`
+- `firmware/esp32_microros_bridge/design.md`
 - `ros2/robot_state_monitor/README.md`
 - `ros2/imu_data_logger/README.md`

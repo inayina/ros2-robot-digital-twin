@@ -4,8 +4,8 @@
 #include <Arduino.h>
 #include <stdint.h>
 
-bool urosPubInit(Print& log, const char* node_name, float imu_filter_alpha);
-bool urosPubIsConnected();
+bool urosPubInit(Print& log, float imu_filter_alpha);
+void urosPubFini(Print& log);
 
 void urosPubPublishImu(float ax, float ay, float az,
                        float gx, float gy, float gz,

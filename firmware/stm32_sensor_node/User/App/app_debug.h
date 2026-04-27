@@ -1,0 +1,8 @@
+#ifndef APP_DEBUG_H
+#define APP_DEBUG_H
+
+#define APP_DEBUG_CMDVEL_RX 0
+#define APP_DEBUG_RUNTIME_STATUS 0
+#define APP_DEBUG_ESTOP_RX 0
+
+#endif

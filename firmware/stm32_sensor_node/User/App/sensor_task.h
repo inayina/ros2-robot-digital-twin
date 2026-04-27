@@ -9,6 +9,8 @@
 extern osThreadId_t SensorTaskHandle;
 extern osMessageQueueId_t SensorQueueHandle;
 
+HAL_StatusTypeDef SensorTaskUartWrite(const uint8_t *data, uint16_t len, uint32_t timeout);
+HAL_StatusTypeDef SensorTaskUartWriteString(const char *text, uint32_t timeout);
 void StartSensorTask(void *argument);
 
 #endif

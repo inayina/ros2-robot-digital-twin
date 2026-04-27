@@ -50,6 +50,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/App/attitude_estimator.c
     User/Bsp/mpu6050.c
     User/Bsp/led_alarm.c
+    User/Bsp/tb6612.c
 )
 
 # Add include paths

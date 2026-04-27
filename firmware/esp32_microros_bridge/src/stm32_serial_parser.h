@@ -20,11 +20,13 @@ struct STM32ImuSample {
 
 typedef void (*STM32ImuSampleCallback)(const STM32ImuSample& sample);
 typedef void (*STM32StateCallback)(int32_t state);
+typedef void (*STM32DebugLineCallback)(const char* line);
 
 class STM32SerialParser {
 public:
     STM32SerialParser(STM32ImuSampleCallback imu_callback,
                       STM32StateCallback state_callback,
+                      STM32DebugLineCallback debug_callback = nullptr,
                       bool accept_train_csv_as_imu = false);
 
     void handle(Stream& serial);
@@ -47,9 +49,11 @@ private:
                     float gx, float gy, float gz,
                     float qx, float qy, float qz, float qw);
     bool publishState(int32_t state);
+    bool publishDebugLine(const char* line);
 
     STM32ImuSampleCallback imu_callback_;
     STM32StateCallback state_callback_;
+    STM32DebugLineCallback debug_callback_;
     bool accept_train_csv_as_imu_;
     char line_buffer_[kLineMax];
     size_t line_len_;

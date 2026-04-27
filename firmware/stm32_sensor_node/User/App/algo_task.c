@@ -1,4 +1,5 @@
 #include "algo_task.h"
+#include "sensor_task.h"
 #include "led_alarm.h"
 #include <stdio.h>
 #include <math.h>
@@ -99,7 +100,7 @@ void StartAlgTask(void *argument)
                 // Send state to UART for ESP32
                 char state_buffer[32];
                 int state_len = snprintf(state_buffer, sizeof(state_buffer), "State:%d\n", features.anomaly_state);
-                HAL_UART_Transmit(&huart1, (uint8_t*)state_buffer, state_len, HAL_MAX_DELAY);
+                (void)SensorTaskUartWrite((const uint8_t *)state_buffer, (uint16_t)state_len, HAL_MAX_DELAY);
 
                 LED_Alarm_SetState(features.anomaly_state);
 
