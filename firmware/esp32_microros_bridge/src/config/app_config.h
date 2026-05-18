@@ -1,6 +1,7 @@
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
 
+#include <freertos/FreeRTOS.h>
 #include <stdint.h>
 
 #include "wifi_config.h"
@@ -39,17 +40,47 @@ constexpr bool kAcceptTrainCsvAsImu = false;
 
 constexpr bool kEnableImuDebug = true;
 constexpr bool kEnableCmdVelDebug = true;
+constexpr bool kEnableTargetRpmDebug = true;
 constexpr bool kEnableBridgeRuntimeDebug = true;
 constexpr bool kEnableStm32DebugLinePrint = false;
 
 constexpr unsigned long kImuDebugIntervalMs = 1000UL;
 constexpr unsigned long kCmdVelDebugIntervalMs = 500UL;
+constexpr unsigned long kTargetRpmDebugIntervalMs = 500UL;
 constexpr unsigned long kBridgeRuntimeDebugIntervalMs = 10000UL;
 
 constexpr unsigned long kWifiRetryIntervalMs = 5000UL;
 constexpr unsigned long kMicroRosInitRetryIntervalMs = 2000UL;
 constexpr uint32_t kExecutorSpinTimeoutMs = 5U;
 constexpr unsigned long kTransportSettleDelayMs = 250UL;
+constexpr unsigned long kRosCommTaskDelayMs = 1UL;
+constexpr unsigned long kMotorControlTaskPeriodMs = 10UL;
+constexpr unsigned long kMotorControlCommandTimeoutMs = 500UL;
+constexpr unsigned long kMotorControlDebugIntervalMs = 2000UL;
+constexpr unsigned long kMotorStatePublishIntervalMs = 100UL;
+
+constexpr float kMockMotorResponseAlpha = 0.08f;
+constexpr float kMockMotorZeroEpsilonRpm = 0.02f;
+constexpr float kMockMotorMaxAbsRpm = 300.0f;
+
+constexpr bool kEnableTb6612ChannelABenchTest = false;
+constexpr int8_t kTb6612BenchChannelAPwmPin = 4;
+constexpr int8_t kTb6612BenchChannelADirIn1Pin = 5;
+constexpr int8_t kTb6612BenchChannelADirIn2Pin = 6;
+constexpr int8_t kTb6612BenchStandbyPin = 18;
+constexpr uint8_t kTb6612BenchChannelAPwmChannel = 0U;
+constexpr uint32_t kTb6612BenchPwmFrequencyHz = 1000U;
+constexpr uint8_t kTb6612BenchPwmResolutionBits = 8U;
+constexpr float kTb6612BenchTestDuty = 0.18f;
+constexpr unsigned long kTb6612BenchPulseMs = 300UL;
+constexpr unsigned long kTb6612BenchCoastMs = 700UL;
+
+constexpr uint32_t kRosCommTaskStackBytes = 8192U;
+constexpr uint32_t kMotorControlTaskStackBytes = 6144U;
+constexpr UBaseType_t kRosCommTaskPriority = 2U;
+constexpr UBaseType_t kMotorControlTaskPriority = 2U;
+constexpr BaseType_t kRosCommTaskCore = 0;
+constexpr BaseType_t kMotorControlTaskCore = 1;
 
 }  // namespace app_config
 

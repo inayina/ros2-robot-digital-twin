@@ -1,4 +1,4 @@
-#include "stm32_serial_parser.h"
+#include "bridge/stm32_serial_parser.h"
 
 #include <math.h>
 #include <stdio.h>

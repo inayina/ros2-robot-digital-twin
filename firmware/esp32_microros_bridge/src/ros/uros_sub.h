@@ -5,10 +5,12 @@
 #include <stdint.h>
 
 typedef void (*UrosCmdVelCallback)(float linear_x, float angular_z);
+typedef void (*UrosTargetRpmCallback)(float target_rpm);
 
 bool urosSubInit(Print& log);
 void urosSubFini(Print& log);
 void urosSubSetCmdVelCallback(UrosCmdVelCallback callback);
+void urosSubSetTargetRpmCallback(UrosTargetRpmCallback callback);
 void urosSubSpinSome(uint32_t timeout_ms);
 
 #endif

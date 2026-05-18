@@ -55,3 +55,5 @@ __pycache__/
 
 # Logs
 *.jsonl
+data/dashboard_state/latest_robot_status.json
+AGENTS.md

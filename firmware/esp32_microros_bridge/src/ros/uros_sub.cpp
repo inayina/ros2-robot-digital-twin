@@ -1,8 +1,9 @@
-#include "uros_sub.h"
+#include "ros/uros_sub.h"
 
-#include "uros_core.h"
+#include "ros/uros_core.h"
 
 #include <geometry_msgs/msg/twist.h>
+#include <std_msgs/msg/float32.h>
 #include <rcl/error_handling.h>
 #include <rcl/rcl.h>
 #include <rcl/subscription.h>
@@ -10,11 +11,15 @@
 #include <rclc/executor.h>
 
 static rcl_subscription_t cmd_vel_subscriber = rcl_get_zero_initialized_subscription();
+static rcl_subscription_t target_rpm_subscriber = rcl_get_zero_initialized_subscription();
 static geometry_msgs__msg__Twist cmd_vel_msg;
+static std_msgs__msg__Float32 target_rpm_msg;
 static rclc_executor_t executor = rclc_executor_get_zero_initialized_executor();
 static UrosCmdVelCallback cmd_vel_callback = nullptr;
+static UrosTargetRpmCallback target_rpm_callback = nullptr;
 static bool initialized = false;
 static bool subscriber_initialized = false;
+static bool target_rpm_subscriber_initialized = false;
 static bool executor_initialized = false;
 static unsigned long last_spin_error_ms = 0;
 
@@ -43,6 +48,16 @@ static void handleCmdVelMessage(const void* msg_in) {
     cmd_vel_callback((float)msg->linear.x, (float)msg->angular.z);
 }
 
+static void handleTargetRpmMessage(const void* msg_in) {
+    if (msg_in == nullptr || target_rpm_callback == nullptr) {
+        return;
+    }
+
+    const std_msgs__msg__Float32* msg =
+        static_cast<const std_msgs__msg__Float32*>(msg_in);
+    target_rpm_callback((float)msg->data);
+}
+
 bool urosSubInit(Print& log) {
     if (initialized) {
         urosSubFini(log);
@@ -65,8 +80,22 @@ bool urosSubInit(Print& log) {
     subscriber_initialized = true;
     log.println("cmd_vel subscriber created");
 
+    log.println("Creating motor target_rpm subscriber (reliable QoS)...");
+    ret = rclc_subscription_init_default(
+        &target_rpm_subscriber,
+        urosCoreNode(),
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+        "/motor/target_rpm"
+    );
+    if (!checkRcl(log, ret, "Failed to create motor target_rpm subscriber")) {
+        urosSubFini(log);
+        return false;
+    }
+    target_rpm_subscriber_initialized = true;
+    log.println("motor target_rpm subscriber created");
+
     log.println("Creating executor...");
-    ret = rclc_executor_init(&executor, &urosCoreSupport()->context, 1, urosCoreAllocator());
+    ret = rclc_executor_init(&executor, &urosCoreSupport()->context, 2, urosCoreAllocator());
     if (!checkRcl(log, ret, "Failed to initialize executor")) {
         urosSubFini(log);
         return false;
@@ -81,6 +110,18 @@ bool urosSubInit(Print& log) {
         ON_NEW_DATA
     );
     if (!checkRcl(log, ret, "Failed to add cmd_vel subscription to executor")) {
+        urosSubFini(log);
+        return false;
+    }
+
+    ret = rclc_executor_add_subscription(
+        &executor,
+        &target_rpm_subscriber,
+        &target_rpm_msg,
+        &handleTargetRpmMessage,
+        ON_NEW_DATA
+    );
+    if (!checkRcl(log, ret, "Failed to add target_rpm subscription to executor")) {
         urosSubFini(log);
         return false;
     }
@@ -100,6 +141,15 @@ void urosSubFini(Print& log) {
         executor_initialized = false;
     }
 
+    if (target_rpm_subscriber_initialized) {
+        rcl_ret_t ret = rcl_subscription_fini(&target_rpm_subscriber, urosCoreNode());
+        if (ret != RCL_RET_OK) {
+            printRclError(log, "Failed to destroy motor target_rpm subscriber");
+        }
+        target_rpm_subscriber = rcl_get_zero_initialized_subscription();
+        target_rpm_subscriber_initialized = false;
+    }
+
     if (subscriber_initialized) {
         rcl_ret_t ret = rcl_subscription_fini(&cmd_vel_subscriber, urosCoreNode());
         if (ret != RCL_RET_OK) {
@@ -114,6 +164,10 @@ void urosSubFini(Print& log) {
 
 void urosSubSetCmdVelCallback(UrosCmdVelCallback callback) {
     cmd_vel_callback = callback;
+}
+
+void urosSubSetTargetRpmCallback(UrosTargetRpmCallback callback) {
+    target_rpm_callback = callback;
 }
 
 void urosSubSpinSome(uint32_t timeout_ms) {

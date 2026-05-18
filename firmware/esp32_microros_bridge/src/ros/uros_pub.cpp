@@ -1,25 +1,35 @@
-#include "uros_pub.h"
+#include "ros/uros_pub.h"
 
-#include "uros_core.h"
+#include "ros/uros_core.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <rcl/error_handling.h>
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
 #include <sensor_msgs/msg/imu.h>
+#include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/int32.h>
+#include <std_msgs/msg/string.h>
 
 static rcl_publisher_t imu_publisher = rcl_get_zero_initialized_publisher();
 static rcl_publisher_t filtered_imu_publisher = rcl_get_zero_initialized_publisher();
 static rcl_publisher_t state_publisher = rcl_get_zero_initialized_publisher();
+static rcl_publisher_t motor_actual_rpm_publisher = rcl_get_zero_initialized_publisher();
+static rcl_publisher_t motor_state_publisher = rcl_get_zero_initialized_publisher();
 static sensor_msgs__msg__Imu imu_msg;
 static sensor_msgs__msg__Imu filtered_imu_msg;
 static std_msgs__msg__Int32 state_msg;
+static std_msgs__msg__Float32 motor_actual_rpm_msg;
+static std_msgs__msg__String motor_state_msg;
+static char motor_state_buffer[256];
 
 static bool initialized = false;
 static bool imu_publisher_initialized = false;
 static bool filtered_imu_publisher_initialized = false;
 static bool state_publisher_initialized = false;
+static bool motor_actual_rpm_publisher_initialized = false;
+static bool motor_state_publisher_initialized = false;
 static bool filter_initialized = false;
 static float filter_alpha = 0.2f;
 static float filtered_ax = 0.0f;
@@ -147,14 +157,78 @@ bool urosPubInit(Print& log, float imu_filter_alpha) {
     }
     state_publisher_initialized = true;
     log.println("State publisher created");
+
+    log.println("Creating motor actual_rpm publisher (best effort QoS)...");
+    ret = rclc_publisher_init_best_effort(
+        &motor_actual_rpm_publisher,
+        urosCoreNode(),
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+        "/motor/actual_rpm"
+    );
+    if (ret != RCL_RET_OK) {
+        log.print("Failed to create motor actual_rpm publisher: ");
+        log.println(rcl_get_error_string().str);
+        rcl_reset_error();
+        urosPubFini(log);
+        return false;
+    }
+    motor_actual_rpm_publisher_initialized = true;
+    log.println("Motor actual_rpm publisher created");
+
+    motor_state_msg.data.data = motor_state_buffer;
+    motor_state_msg.data.size = 0;
+    motor_state_msg.data.capacity = sizeof(motor_state_buffer);
+
+    log.println("Creating motor state publisher (best effort QoS)...");
+    ret = rclc_publisher_init_best_effort(
+        &motor_state_publisher,
+        urosCoreNode(),
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+        "/motor/state"
+    );
+    if (ret != RCL_RET_OK) {
+        log.print("Failed to create motor state publisher: ");
+        log.println(rcl_get_error_string().str);
+        rcl_reset_error();
+        urosPubFini(log);
+        return false;
+    }
+    motor_state_publisher_initialized = true;
+    log.println("Motor state publisher created");
     initialized = true;
     return true;
 }
 
 void urosPubFini(Print& log) {
     if (!initialized && !imu_publisher_initialized &&
-        !filtered_imu_publisher_initialized && !state_publisher_initialized) {
+        !filtered_imu_publisher_initialized && !state_publisher_initialized &&
+        !motor_actual_rpm_publisher_initialized && !motor_state_publisher_initialized) {
         return;
+    }
+
+    if (motor_state_publisher_initialized) {
+        rcl_ret_t ret = rcl_publisher_fini(&motor_state_publisher, urosCoreNode());
+        if (ret != RCL_RET_OK) {
+            log.print("Failed to destroy motor state publisher: ");
+            log.println(rcl_get_error_string().str);
+            rcl_reset_error();
+        }
+        motor_state_publisher = rcl_get_zero_initialized_publisher();
+        motor_state_publisher_initialized = false;
+        motor_state_msg.data.data = nullptr;
+        motor_state_msg.data.size = 0;
+        motor_state_msg.data.capacity = 0;
+    }
+
+    if (motor_actual_rpm_publisher_initialized) {
+        rcl_ret_t ret = rcl_publisher_fini(&motor_actual_rpm_publisher, urosCoreNode());
+        if (ret != RCL_RET_OK) {
+            log.print("Failed to destroy motor actual_rpm publisher: ");
+            log.println(rcl_get_error_string().str);
+            rcl_reset_error();
+        }
+        motor_actual_rpm_publisher = rcl_get_zero_initialized_publisher();
+        motor_actual_rpm_publisher_initialized = false;
     }
 
     if (state_publisher_initialized) {
@@ -230,4 +304,49 @@ void urosPubPublishState(int32_t state) {
 
     state_msg.data = state;
     logPublishError("/robot/state", rcl_publish(&state_publisher, &state_msg, NULL));
+}
+
+void urosPubPublishMotorActualRpm(float actual_rpm) {
+    if (!initialized || !urosCoreIsConnected() || !motor_actual_rpm_publisher_initialized) {
+        return;
+    }
+
+    motor_actual_rpm_msg.data = actual_rpm;
+    logPublishError(
+        "/motor/actual_rpm",
+        rcl_publish(&motor_actual_rpm_publisher, &motor_actual_rpm_msg, NULL));
+}
+
+void urosPubPublishMotorState(const MotorControlStateSnapshot& state) {
+    if (!initialized || !urosCoreIsConnected() || !motor_state_publisher_initialized) {
+        return;
+    }
+
+    const int len = snprintf(
+        motor_state_buffer,
+        sizeof(motor_state_buffer),
+        "{\"target_rpm\":%.3f,\"actual_rpm\":%.3f,\"error_rpm\":%.3f,"
+        "\"pwm_duty\":%.3f,\"direction\":%d,\"control_enabled\":%d,"
+        "\"saturated\":%d,\"timeout\":%d,\"estop\":%d,\"fault\":%d,"
+        "\"source\":\"%s\",\"loop\":%lu}",
+        state.target_rpm,
+        state.actual_rpm,
+        state.error_rpm,
+        state.pwm_duty,
+        (int)state.direction,
+        state.control_enabled ? 1 : 0,
+        state.saturated ? 1 : 0,
+        state.timeout_active ? 1 : 0,
+        state.estop_active ? 1 : 0,
+        state.fault_active ? 1 : 0,
+        motorCommandSourceName(state.active_source),
+        (unsigned long)state.loop_count);
+
+    if (len <= 0) {
+        return;
+    }
+
+    motor_state_msg.data.size =
+        (len < (int)sizeof(motor_state_buffer)) ? (size_t)len : sizeof(motor_state_buffer) - 1U;
+    logPublishError("/motor/state", rcl_publish(&motor_state_publisher, &motor_state_msg, NULL));
 }

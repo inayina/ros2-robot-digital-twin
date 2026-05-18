@@ -45,12 +45,24 @@ ROS 2 /cmd_vel      (geometry_msgs/msg/Twist, ESP32 侧 reliable subscriber)
      - 10 ms 调度
      - 200 ms 超时急停
   -> TB6612 A 路单电机
+
+ESP32 本地电机控制骨架
+ROS 2 /motor/target_rpm (std_msgs/msg/Float32, ESP32 侧 reliable subscriber)
+  -> ESP32 ros_comm_task / executor
+  -> Core 0 / Core 1 shared motor command
+  -> ESP32 motor_control_task
+     - 10 ms 调度
+     - command timeout 检查
+     - 当前使用 mock motor response
+  -> shared motor state
+  -> /motor/actual_rpm (std_msgs/msg/Float32, best_effort)
+  -> /motor/state      (std_msgs/msg/String, best_effort)
 ```
 
 ## Roles
 
-- STM32：负责采样、姿态解算、状态判别、本地 LED 报警，以及 TB6612 执行控制。
-- ESP32：负责 UART 文本协议解析、micro-ROS 建链、ROS 2 话题发布，以及 `/cmd_vel` 下行转发。
+- STM32：负责采样、姿态解算、状态判别、本地 LED 报警；既有 TB6612 A 路执行控制保留为 legacy open-loop 验证链路。
+- ESP32：负责 UART 文本协议解析、micro-ROS 建链、ROS 2 话题发布、`/cmd_vel` 下行转发，以及后续 N20 编码器电机本地闭环主线。
 - ROS 2 主机：负责运行 Agent、Gazebo 可视化、IMU/状态记录和实时绘图。
 
 ## ROS 2 Topics
@@ -61,6 +73,9 @@ ROS 2 /cmd_vel      (geometry_msgs/msg/Twist, ESP32 侧 reliable subscriber)
 | `/imu/filtered` | `sensor_msgs/msg/Imu` | ESP32 -> ROS 2 | `best_effort` | 线加速度/角速度经过一阶低通，姿态四元数保持不变 |
 | `/robot/state` | `std_msgs/msg/Int32` | ESP32 -> ROS 2 | `best_effort` | STM32 `AlgTask` 的 RMS 状态判别结果 |
 | `/cmd_vel` | `geometry_msgs/msg/Twist` | ROS 2 -> ESP32 | `reliable` subscriber on ESP32 | 人工控制输入，经 UART 转成 `CMDVEL` 发往 STM32 |
+| `/motor/target_rpm` | `std_msgs/msg/Float32` | ROS 2 -> ESP32 | `reliable` subscriber on ESP32 | ESP32 本地单电机控制目标转速入口 |
+| `/motor/actual_rpm` | `std_msgs/msg/Float32` | ESP32 -> ROS 2 | `best_effort` | 当前由 mock motor response 生成，后续替换为编码器反馈 |
+| `/motor/state` | `std_msgs/msg/String` | ESP32 -> ROS 2 | `best_effort` | 当前 JSON 字符串，包含 target / actual / error / timeout 等状态 |
 
 ## UART Protocol
 
@@ -89,3 +104,4 @@ ROS 2 /cmd_vel      (geometry_msgs/msg/Twist, ESP32 侧 reliable subscriber)
 - `IMUQ` 输出被分频到约 `50 Hz`，以减轻 UART 和桥接端压力。
 - `State:<n>` 由 `10` 个样本组成一个窗口，因此当前状态输出约为 `10 Hz`。
 - Gazebo 默认消费 `/imu/filtered`，并通过 `lock_yaw:=true` 固定初始 yaw，减少 6 轴方案的漂移观感。
+- ESP32 的 `/motor/target_rpm -> /motor/actual_rpm / /motor/state` 当前是无硬件 mock 链路，用于在 N20 编码器、CPR/PPR、PWM/DIR 和 PID 参数实测前验证 ROS 2 topic 与双核任务数据流。

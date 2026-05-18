@@ -1,78 +1,164 @@
 # ESP32 micro-ROS Bridge
 
-这个子工程是 `robot-state-monitor-v1` 里的 ESP32-S3 网桥固件。它位于 STM32 传感节点与 ROS 2 主机之间，负责两条链路：
+本仓库是 **ESP32-S3 DevKitC-1** 的 micro-ROS 网桥工程，并逐步承接 N20 编码器电机闭环控制主线。
+它位于 STM32 传感节点、电机控制链路与 ROS 2 主机之间，当前负责两件事：
 
-1. `STM32 UART -> ESP32 -> /imu/data /imu/filtered /robot/state`
-2. `ROS 2 /cmd_vel -> ESP32 -> UART CMDVEL -> STM32`
+1. 把 STM32 上行串口数据解析后发布到 ROS 2
+2. 订阅 ROS 2 `/cmd_vel`，再通过串口下发给 STM32
 
-当前代码已经对齐到这次联调后的结构：
+当前项目角色是：
+
+- **STM32**：MPU6050 采样、姿态解算、robot state 输出、既有数字孪生链路
+- **ESP32**：WiFi + micro-ROS + 串口协议转换，后续作为 N20 motor controller
+- **PC / ROS 2**：Agent、目标速度下发、状态可视化、系统集成
+
+## 当前状态
+
+当前代码已经覆盖以下链路：
+
+- 上行：
+  `STM32 UART -> ESP32 解析 -> /imu/data + /imu/filtered + /robot/state`
+- 下行：
+  `ROS 2 /cmd_vel -> ESP32 subscriber -> UART CMDVEL -> STM32`
+
+当前运行时已经拆成双核骨架：
+
+- Core 0：`ros_comm_task`
+  负责 WiFi、micro-ROS、STM32 串口解析、`/cmd_vel` legacy bridge、`/motor/target_rpm` 接收
+- Core 1：`motor_control_task`
+  负责电机控制循环、命令超时检查、mock rpm 响应和共享状态更新
+
+当前已实现的话题：
 
 - 发布 `/imu/data`：`sensor_msgs/msg/Imu`
 - 发布 `/imu/filtered`：`sensor_msgs/msg/Imu`
 - 发布 `/robot/state`：`std_msgs/msg/Int32`
+- 发布 `/motor/actual_rpm`：`std_msgs/msg/Float32`
+- 发布 `/motor/state`：`std_msgs/msg/String`
 - 订阅 `/cmd_vel`：`geometry_msgs/msg/Twist`
+- 订阅 `/motor/target_rpm`：`std_msgs/msg/Float32`
+
+## 当前路线
+
+电机闭环控制主线迁移到 ESP32：当前 TB6612 A 通道保留给 130 普通电机做驱动通道辅助验证，TB6612 B 通道承担单 6V N20 编码器减速电机闭环主线。单 N20 跑通后，再购买第二个同规格 N20，把 A 通道从 130 切换为 N20 扩展双轮差速。STM32 既有 open-loop motor control 仅保留为 legacy experiment / early validation，不再继续扩展为编码器读取、PID 调速、双轮差速或 `ros2_control` 主线。详细架构见 [docs/design.md](docs/design.md) 和 [docs/motor_control_design.md](docs/motor_control_design.md)。
+
+当前代码已经实现双核任务框架、`target_rpm` 命令入口、mock `actual_rpm` 响应、`/motor/state` 发布和 TB6612 驱动文件骨架，但真实 PWM / 编码器 / PID 硬件闭环还没有接入，现阶段仍属于 motor-control skeleton。
+
+130 普通电机 A 通道 bench test 已保留为可开关调试项：
+
+- `kEnableTb6612ChannelABenchTest = false`
+- `GPIO4 -> PWMA`
+- `GPIO5 -> AIN1`
+- `GPIO6 -> AIN2`
+- `GPIO18 -> STBY`
+- 打开后，上电会低占空比正转短脉冲、coast、低占空比反转短脉冲、最后禁用 STBY
+
+当前接线规划是 TB6612 A 通道保留 130、TB6612 B 通道先做 N20；ESP32 具体 GPIO 到 TB6612 / 编码器的规划见 [docs/motor_control_design.md](docs/motor_control_design.md)。
 
 ## 代码结构
 
-- `src/app_config.h`
-  发布版配置入口，放串口参数、重试周期和调试开关；WiFi/Agent 地址来自 `include/wifi_config.h`
-- `src/main.cpp`
-  WiFi 管理、micro-ROS 初始化、串口桥接和运行期日志
-- `src/uros_core.[h/cpp]`
-  `rclc support / node / allocator`
-- `src/uros_pub.[h/cpp]`
-  `/imu/data`、`/imu/filtered`、`/robot/state`
-- `src/uros_sub.[h/cpp]`
-  `/cmd_vel` subscriber 与 executor
-- `src/stm32_serial_parser.[h/cpp]`
-  STM32 上行文本协议解析
+`src/` 当前按职责拆成了这些模块入口：
 
-## 本地配置
+- `main.cpp`
+  程序入口，负责 task 启动和系统装配
+- `config/app_config.h`
+  ESP32 侧集中配置入口，放 WiFi、Agent、串口参数、初始化重试周期、调试开关
+- `ros/uros_core.[h/cpp]`
+  micro-ROS 基础上下文，负责 `support / node / allocator`
+- `ros/uros_pub.[h/cpp]`
+  上行 publisher，负责 IMU / robot state 和 mock motor state 发布
+- `ros/uros_sub.[h/cpp]`
+  下行 subscriber，负责 `/cmd_vel`、`/motor/target_rpm` 和 executor
+- `bridge/stm32_serial_parser.[h/cpp]`
+  STM32 上行串口协议解析
+- `motor/motor_control_shared.[h/cpp]`
+  Core 0 / Core 1 之间的共享命令与状态快照
+- `motor/motor_controller.[h/cpp]`
+  Core 1 电机控制骨架，当前使用 mock motor response，预留真实 PWM/DIR、encoder A/B、PID 接口
+- `motor/motor_response_model.[h/cpp]`
+  无硬件 mock motor response，用于在 N20 未到货时验证 `target_rpm -> actual_rpm` 数据流
+- `motor/encoder_rpm_estimator.[h/cpp]`
+  编码器计数到 rpm 的纯逻辑估算模块，等待 N20 CPR/PPR 实测后接入真实计数
+- `motor/speed_pid.[h/cpp]`
+  速度 PID 纯逻辑模块，包含输出限幅和积分限幅
+- `motor/single_motor_control.[h/cpp]`
+  单电机闭环状态组合模块，把 `target_rpm`、`actual_rpm`、PID 输出和 timeout 组合成控制状态
+- `motor/tb6612_driver.[h/cpp]`
+  TB6612 A/B 双通道 PWM/DIR/STBY 驱动边界，当前只提供可配置接口，不写死 GPIO、PWM channel、频率或分辨率
 
-真实 WiFi 凭据不要提交到 Git。第一次构建前先复制示例文件：
+这样拆开后：
 
-```bash
-cp include/wifi_config.example.h include/wifi_config.h
+- `uros_pub` 不再混订阅逻辑
+- `uros_sub` 可以继续扩 `ESTOP`、enable 等下行接口
+- `uros_core` 统一管理 node/support，避免 pub/sub 各自重复持有
+
+## 硬件连接
+
+- UART：
+  `GPIO16 (RX) <- STM32 TX`
+  `GPIO17 (TX) -> STM32 RX`
+- 波特率：`921600`
+- USB CDC：已开启
+- WiFi SSID：由本地 `include/wifi_config.h` 提供，上传仓库只保留 `include/wifi_config.example.h`
+- micro-ROS Agent：由本地 `include/wifi_config.h` 提供
+
+这些参数现在统一收口在：
+
+- [include/wifi_config.example.h](include/wifi_config.example.h)
+- [app_config.h](src/config/app_config.h)
+
+STM32 上电后，ESP32 会主动发送：
+
+```text
+G\n
 ```
 
-然后编辑 `include/wifi_config.h`：
+用于请求 STM32 进入 `GAZEBO` / ROS 输出模式。
 
-```cpp
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASS "YOUR_WIFI_PASSWORD"
-#define AGENT_IP "192.168.1.8"
-#define AGENT_PORT 8888
-```
+## 配置与调试
 
-`src/app_config.h` 会从这个文件读取：
+ESP32 侧的配置分两层：
 
-- WiFi SSID / Password
-- Agent IP / Port
+- `include/wifi_config.h`：本地 WiFi SSID / Password、Agent IP / Port，不提交到 Git
+- [app_config.h](src/config/app_config.h)：ROS 节点名、串口、IMU 滤波、重试周期、任务栈和调试开关
 
-下面这些仍然在 `src/app_config.h` 里维护：
+默认可开关的 ESP32 高频调试包括：
 
-- ROS 节点名
-- IMU 滤波参数
-- WiFi 重试周期、micro-ROS 初始化重试周期
-- `[IMU ...]`、`[CMDVEL]`、`[STM32]`、运行期状态日志开关
+- `[IMU ...]`
+- `[CMDVEL] ...`
+- `[STM32] ...`
+- `System running normally ...`
+
+STM32 侧串口调试开关集中在：
+
+- [app_debug.h](../stm32_sensor_node/User/App/app_debug.h)
+
+默认关闭的 STM32 高频调试包括：
+
+- `DBG:CMDVEL_RX,...`
+- `DBG:STAT,...`
+- `DBG:ESTOP_RX`
 
 ## 串口协议
 
 ### STM32 -> ESP32
 
+当前支持以下上行格式：
+
 - `IMUQ,ax,ay,az,gx,gy,gz,qx,qy,qz,qw,temp`
 - `IMU,ax,ay,az,gx,gy,gz,temp`
 - `State:<n>`
-- `DBG:...`
 
 说明：
 
 - `IMUQ` 是当前主格式，包含四元数姿态
 - 旧 `IMU` 格式仍兼容，但会用单位四元数占位
-- `DBG:` 行会被当作调试文本转发到 USB 串口，不会发布成 ROS 话题
-- 训练 CSV 默认不会被当作正式 IMU 输入，因为 `kAcceptTrainCsvAsImu = false`
+- 训练 CSV 目前默认 **不** 当作正式 IMU 话题输入
+  因为代码里 `ACCEPT_TRAIN_CSV_AS_IMU = false`
 
 ### ESP32 -> STM32
+
+当前下行格式：
 
 ```text
 CMDVEL,<linear_x>,<angular_z>\n
@@ -85,51 +171,213 @@ CMDVEL,0.200,0.000
 CMDVEL,0.000,1.000
 ```
 
-## 连接模型
+当前还没有在 ESP32 侧单独实现 ROS 话题式 `ESTOP`，如果后续要扩，可优先放进 `uros_sub`。
 
-当前默认是简化连接模型：
+## ROS 2 行为
 
-1. 上电后先连 WiFi
-2. WiFi 连上后配置 UDP transport
-3. 周期性尝试 `createMicroRosEntities()`
-4. 初始化成功后持续 `spin`
-5. 只有 WiFi 真掉线时才销毁 entities 并重建
+### 发布话题
 
-运行态默认不再周期性 `ping` Agent，这样更适合高频 IMU 上行的现场链路。
+- `/imu/data`
+  原始解析后的 IMU 数据
+- `/imu/filtered`
+  线加速度与角速度的一阶低通滤波结果
+- `/robot/state`
+  STM32 推理得到的状态值
+- `/motor/actual_rpm`
+  当前 mock motor response 得到的实际转速估计
+- `/motor/state`
+  当前 mock 电机状态字符串，包含 target / actual / error / timeout 等字段
 
-## 构建与上传
+### 订阅话题
+
+- `/cmd_vel`
+  类型：`geometry_msgs/msg/Twist`
+- `/motor/target_rpm`
+  类型：`std_msgs/msg/Float32`
+
+收到 `/cmd_vel` 后，ESP32 会把：
+
+- `linear.x`
+- `angular.z`
+
+编码成 `CMDVEL` 文本帧，经 `UART1` 发给 STM32。
+
+收到 `/motor/target_rpm` 后，ESP32 会把目标转速写入 Core 0 / Core 1 共享命令。当前 `motor_control_task` 先用 mock response 模拟 `actual_rpm` 追踪 `target_rpm`，并通过 `/motor/actual_rpm` 和 `/motor/state` 回传状态；N20 到货并实测后，再把 mock response 替换为真实 encoder/PID 反馈。
+
+## 连接恢复
+
+ESP32 当前使用简化连接模型：
+
+- 上电后先连 WiFi
+- WiFi 连上后配置 UDP transport
+- 周期性尝试 `createMicroRosEntities()`
+- 初始化成功后只保持正常 `spin`
+
+当前默认不会在运行态周期性 `ping` Agent。只有在 WiFi 真掉线时，ESP32 才会：
+
+- 销毁当前 micro-ROS entities
+- 重新连 WiFi
+- 在 WiFi 恢复后重新初始化 node / publishers / subscriber / executor
+
+## 依赖
+
+- PlatformIO
+- `micro_ros_arduino` `jazzy`
+- ESP32 Arduino framework
+- ROS 2 Jazzy
+- micro-ROS Agent `udp4`
+
+## 构建
+
+如果你的 shell 里已经有 `pio`：
 
 ```bash
-python3 -m platformio run
-python3 -m platformio run --target upload --upload-port /dev/ttyACM0
-python3 -m platformio device monitor -b 921600 --port /dev/ttyACM0
+pio run
 ```
 
-如果你的环境里已经有 `pio`，也可以直接用 `pio run`。
+如果没有把 PlatformIO 加进 PATH，可以直接用：
 
-## 预期启动日志
+```bash
+~/.platformio/penv/bin/pio run
+```
+
+本仓库也保留了 Python venv，可以这样运行：
+
+```bash
+./.venv/bin/python3 -m platformio run
+```
+
+上传：
+
+```bash
+~/.platformio/penv/bin/pio run --target upload --upload-port /dev/ttyACM0
+```
+
+串口监视：
+
+```bash
+~/.platformio/penv/bin/pio device monitor -b 921600 --port /dev/ttyACM0
+```
+
+## 启动顺序
+
+1. 启动 micro-ROS Agent
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /home/ina/microros_ws/install/setup.bash
+ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
+```
+
+2. 烧录并启动 ESP32
+
+```bash
+cd firmware/esp32_microros_bridge
+~/.platformio/penv/bin/pio run --target upload --upload-port /dev/ttyACM0
+```
+
+3. 打开串口监视器，确认日志包含：
 
 ```text
-ESP32-S3 micro-ROS Bridge v1.1 WiFi-only - Starting...
-Requested STM32 GAZEBO mode
+ESP32-S3 micro-ROS Bridge v1.2 dual-core - Starting...
+Connecting to WiFi: ...
 WiFi Connected! IP: ...
 micro-ROS WiFi transport configured
-Connecting to micro-ROS Agent at ...:8888
+Connecting to micro-ROS Agent at 192.168.1.8:8888
 micro-ROS connected!
 ```
 
-## 常用检查
+4. 在 ROS 2 主机查看话题：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 ros2 topic list
-ros2 topic echo --once /imu/data
-ros2 topic echo --once /imu/filtered
-ros2 topic echo --once /robot/state
-ros2 topic info -v /cmd_vel
+ros2 topic echo /imu/data
+ros2 topic echo /robot/state
 ```
 
-## 相关文档
+## 用 rqt 控制
 
-- `design.md`
-- `Debug.md`
+当前软件链路已经实现 `CMDVEL` 接收与下发，可以直接用：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+rqt_robot_steering
+```
+
+在 `rqt_robot_steering` 里设置：
+
+- topic：`/cmd_vel`
+
+也可以直接命令行测试：
+
+```bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.2}, angular: {z: 0.0}}"
+```
+
+如果串口监视器里看到类似日志：
+
+```text
+[CMDVEL] vx=0.200 wz=0.000
+```
+
+说明 ESP32 已经收到 `/cmd_vel` 并开始向 STM32 下发控制帧。
+
+## Legacy 电机链路现状
+
+当前已经确认的早期验证链路是：
+
+```text
+/cmd_vel
+  -> ESP32 subscriber
+  -> UART CMDVEL
+  -> STM32 CMDVEL 解析
+  -> MotorTask
+  -> TB6612 A 路
+```
+
+这轮实测里，`ros2 topic pub --once /cmd_vel ...` 后，ESP32 已打印：
+
+```text
+[CMDVEL] vx=0.200 wz=0.000
+```
+
+结合 STM32 当前代码实现，可以确认：
+
+- `sensor_task.c` 已使用 `strtof` 解析 `CMDVEL`
+- 合法命令会清除 `g_motor_estop`
+- `MotorTask` 每 `10 ms` 执行一次
+- `CMDVEL` 超时保护为 `200 ms`
+- `TB6612` 当前驱动的是 A 路单电机
+
+这条链路证明 ROS 2 到真实下位机执行层已经打通，但它不再作为新的电机闭环主线。当前还没有直接量到 `PWMA/AIN1/AIN2/STBY` 的示波器级波形，所以更准确的说法是：
+
+- 软件链路已经打通
+- 单电机 A 路的物理转动已经现场确认
+- 当前 ESP32 侧已经有 mock `/motor/state`，后续剩下的是把执行反馈替换成真实硬件观测
+
+## 已知限制
+
+- 当前只桥接 `/cmd_vel`，还没有独立的 ROS `ESTOP` 话题
+- STM32 侧电机控制语义仅作为 legacy experiment 保留
+- WiFi、Agent、串口任一链路异常时，真正的安全停车仍需要 STM32 执行层负责
+- `IMUQ` 是当前推荐上行格式，旧 `IMU` 仅作兼容保留
+
+## 故障排除
+
+- 如果只看到 `/parameter_events` 和 `/rosout`，优先检查 Agent 是否已启动，以及 ESP32 是否打印 `Connecting to micro-ROS Agent at ...`
+- 如果 `/robot/state` 有数据但 `/imu/data` 没有，检查 STM32 串口输出是否仍是 `IMUQ` 或 `IMU`
+- 如果 `rqt` 在发 `/cmd_vel`，但串口监视器没有 `[CMDVEL]` 日志，优先检查 subscriber 是否成功初始化
+- 如果需要继续查 STM32 收命令问题，优先临时打开 [app_debug.h](../stm32_sensor_node/User/App/app_debug.h) 里的 `DBG` 开关
+- 如果 `/dev/ttyACM0` 消失，关闭监视器后重新插拔开发板
+- 如果 `pio` 不在 PATH，改用 `~/.platformio/penv/bin/pio`
+- 当前架构说明见 [docs/design.md](docs/design.md)
+- 更多排障记录见 [Debug.md](Debug.md)
+
+## 版本信息
+
+- micro-ROS：jazzy
+- ROS 2：Jazzy Jalisco
+- 平台：PlatformIO `espressif32`
+- 板卡：`esp32-s3-devkitc-1`
+- 固件标识：`ESP32-S3 micro-ROS Bridge v1.2 dual-core`

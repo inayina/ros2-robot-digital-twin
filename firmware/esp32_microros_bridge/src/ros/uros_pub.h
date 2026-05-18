@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#include "motor/motor_control_shared.h"
+
 bool urosPubInit(Print& log, float imu_filter_alpha);
 void urosPubFini(Print& log);
 
@@ -11,5 +13,7 @@ void urosPubPublishImu(float ax, float ay, float az,
                        float gx, float gy, float gz,
                        float qx, float qy, float qz, float qw);
 void urosPubPublishState(int32_t state);
+void urosPubPublishMotorActualRpm(float actual_rpm);
+void urosPubPublishMotorState(const MotorControlStateSnapshot& state);
 
 #endif

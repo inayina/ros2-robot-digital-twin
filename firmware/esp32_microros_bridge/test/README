@@ -1,11 +1,36 @@
 
-This directory is intended for PlatformIO Test Runner and project tests.
+# Test Notes
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
+当前阶段建议保留两类测试：
 
-More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+- host unit tests：验证不依赖 ESP32 硬件的纯逻辑，例如 mock motor response、timeout、限幅和 legacy command 语义。
+- bench tests：验证 TB6612、PWM/DIR、STBY、电机电源和接线，只在实物安全确认后开启。
+
+## Host Unit Tests
+
+运行：
+
+```bash
+bash test/run_host_tests.sh
+```
+
+当前覆盖：
+
+- `target_rpm` 一阶 mock response
+- `actual_rpm` / `error_rpm` / `pwm_duty`
+- target rpm 限幅和 `saturated`
+- command timeout 后禁用控制
+- legacy `/cmd_vel` 不进入 ESP32 本地 rpm 控制
+- encoder count / delta count 到 rpm 的换算
+- PID 输出、限幅、积分 reset
+- 单 N20 闭环状态组合逻辑
+
+## Hardware Bench Tests
+
+130 普通电机 A 通道 bench test 当前由 [app_config.h](src/config/app_config.h) 中的 `kEnableTb6612ChannelABenchTest` 控制。
+
+注意：
+
+- host unit tests 不会访问 GPIO/PWM。
+- TB6612 bench test 会真实驱动 A 通道。
+- 做普通软件开发时，建议关闭 `kEnableTb6612ChannelABenchTest`。
