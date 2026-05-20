@@ -6,11 +6,13 @@
 
 typedef void (*UrosCmdVelCallback)(float linear_x, float angular_z);
 typedef void (*UrosTargetRpmCallback)(float target_rpm);
+typedef void (*UrosMotorCmdCallback)(const char* payload);
 
 bool urosSubInit(Print& log);
 void urosSubFini(Print& log);
 void urosSubSetCmdVelCallback(UrosCmdVelCallback callback);
 void urosSubSetTargetRpmCallback(UrosTargetRpmCallback callback);
+void urosSubSetMotorCmdCallback(UrosMotorCmdCallback callback);
 void urosSubSpinSome(uint32_t timeout_ms);
 
 #endif

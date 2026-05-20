@@ -4,6 +4,7 @@
 
 #include <geometry_msgs/msg/twist.h>
 #include <std_msgs/msg/float32.h>
+#include <std_msgs/msg/string.h>
 #include <rcl/error_handling.h>
 #include <rcl/rcl.h>
 #include <rcl/subscription.h>
@@ -12,14 +13,19 @@
 
 static rcl_subscription_t cmd_vel_subscriber = rcl_get_zero_initialized_subscription();
 static rcl_subscription_t target_rpm_subscriber = rcl_get_zero_initialized_subscription();
+static rcl_subscription_t motor_cmd_subscriber = rcl_get_zero_initialized_subscription();
 static geometry_msgs__msg__Twist cmd_vel_msg;
 static std_msgs__msg__Float32 target_rpm_msg;
+static std_msgs__msg__String motor_cmd_msg;
+static char motor_cmd_buffer[384];
 static rclc_executor_t executor = rclc_executor_get_zero_initialized_executor();
 static UrosCmdVelCallback cmd_vel_callback = nullptr;
 static UrosTargetRpmCallback target_rpm_callback = nullptr;
+static UrosMotorCmdCallback motor_cmd_callback = nullptr;
 static bool initialized = false;
 static bool subscriber_initialized = false;
 static bool target_rpm_subscriber_initialized = false;
+static bool motor_cmd_subscriber_initialized = false;
 static bool executor_initialized = false;
 static unsigned long last_spin_error_ms = 0;
 
@@ -58,6 +64,20 @@ static void handleTargetRpmMessage(const void* msg_in) {
     target_rpm_callback((float)msg->data);
 }
 
+static void handleMotorCmdMessage(const void* msg_in) {
+    if (msg_in == nullptr || motor_cmd_callback == nullptr) {
+        return;
+    }
+
+    const std_msgs__msg__String* msg =
+        static_cast<const std_msgs__msg__String*>(msg_in);
+    if (msg->data.data == nullptr || msg->data.size == 0U) {
+        return;
+    }
+
+    motor_cmd_callback(msg->data.data);
+}
+
 bool urosSubInit(Print& log) {
     if (initialized) {
         urosSubFini(log);
@@ -94,8 +114,26 @@ bool urosSubInit(Print& log) {
     target_rpm_subscriber_initialized = true;
     log.println("motor target_rpm subscriber created");
 
+    motor_cmd_msg.data.data = motor_cmd_buffer;
+    motor_cmd_msg.data.size = 0U;
+    motor_cmd_msg.data.capacity = sizeof(motor_cmd_buffer);
+
+    log.println("Creating motor cmd subscriber (reliable QoS)...");
+    ret = rclc_subscription_init_default(
+        &motor_cmd_subscriber,
+        urosCoreNode(),
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+        "/motor/cmd"
+    );
+    if (!checkRcl(log, ret, "Failed to create motor cmd subscriber")) {
+        urosSubFini(log);
+        return false;
+    }
+    motor_cmd_subscriber_initialized = true;
+    log.println("motor cmd subscriber created");
+
     log.println("Creating executor...");
-    ret = rclc_executor_init(&executor, &urosCoreSupport()->context, 2, urosCoreAllocator());
+    ret = rclc_executor_init(&executor, &urosCoreSupport()->context, 3, urosCoreAllocator());
     if (!checkRcl(log, ret, "Failed to initialize executor")) {
         urosSubFini(log);
         return false;
@@ -125,6 +163,18 @@ bool urosSubInit(Print& log) {
         urosSubFini(log);
         return false;
     }
+
+    ret = rclc_executor_add_subscription(
+        &executor,
+        &motor_cmd_subscriber,
+        &motor_cmd_msg,
+        &handleMotorCmdMessage,
+        ON_NEW_DATA
+    );
+    if (!checkRcl(log, ret, "Failed to add motor_cmd subscription to executor")) {
+        urosSubFini(log);
+        return false;
+    }
     log.println("Executor ready");
 
     initialized = true;
@@ -150,6 +200,15 @@ void urosSubFini(Print& log) {
         target_rpm_subscriber_initialized = false;
     }
 
+    if (motor_cmd_subscriber_initialized) {
+        rcl_ret_t ret = rcl_subscription_fini(&motor_cmd_subscriber, urosCoreNode());
+        if (ret != RCL_RET_OK) {
+            printRclError(log, "Failed to destroy motor cmd subscriber");
+        }
+        motor_cmd_subscriber = rcl_get_zero_initialized_subscription();
+        motor_cmd_subscriber_initialized = false;
+    }
+
     if (subscriber_initialized) {
         rcl_ret_t ret = rcl_subscription_fini(&cmd_vel_subscriber, urosCoreNode());
         if (ret != RCL_RET_OK) {
@@ -168,6 +227,10 @@ void urosSubSetCmdVelCallback(UrosCmdVelCallback callback) {
 
 void urosSubSetTargetRpmCallback(UrosTargetRpmCallback callback) {
     target_rpm_callback = callback;
+}
+
+void urosSubSetMotorCmdCallback(UrosMotorCmdCallback callback) {
+    motor_cmd_callback = callback;
 }
 
 void urosSubSpinSome(uint32_t timeout_ms) {

@@ -2,11 +2,11 @@
 
 基于 STM32、ESP32 micro-ROS、ROS 2 Jazzy 和 Gazebo Harmonic 的无线 IMU 状态监测与数字孪生项目，并逐步把 N20 编码器电机闭环控制主线迁移到 ESP32。
 
-这个整合仓库已经同步到当前联调版本，当前系统分成三层：
+这个整合仓库已经同步到当前联调版本，当前系统分成三层，并额外提供面向 dashboard backend 的 MQTT 状态桥：
 
 - STM32F411：100 Hz 采样 MPU6050，完成 6 轴姿态解算、窗口 RMS 状态判别、LED 报警；既有 `CMDVEL -> TB6612 A 路` 只保留为 legacy open-loop 验证链路
 - ESP32-S3：通过 UART 解析 STM32 文本帧，通过 WiFi UDP 建立 micro-ROS 链路，发布 `/imu/data`、`/imu/filtered`、`/robot/state`，订阅 `/cmd_vel` 和 `/motor/target_rpm`，并已落地双核 motor-control skeleton
-- ROS 2 Jazzy：提供 Gazebo Harmonic 数字孪生、IMU CSV/状态 JSONL 记录，以及 raw/filtered 实时曲线可视化
+- ROS 2 Jazzy：提供 Gazebo Harmonic 数字孪生、IMU CSV/状态 JSONL 记录、raw/filtered 实时曲线可视化，以及 `robot_mqtt_bridge` 电机状态 MQTT 输出
 
 ## 仓库结构
 
@@ -17,9 +17,17 @@ firmware/
 ros2/
   robot_state_monitor/        # Gazebo Harmonic 可视化桥接包
   imu_data_logger/            # ROS 2 Python 记录与实时绘图包
+  robot_mqtt_bridge/          # ROS 2 -> MQTT dashboard telemetry bridge
+archive/
+  robot_status_api_bridge_legacy/  # 已归档的旧 JSON/HTTP 状态聚合桥
 docs/
   resume-bullets.md
   data-flow.md              # 当前数据流与话题/串口关系
+  dashboard-integration.md  # dashboard / backend 集成边界
+  motor_dashboard_interface.md # 电机状态/控制接口契约
+  motor_dashboard_progress_2026_05_20.md # 当前联调进度与阻塞
+  robot_ops_dashboard_handoff.md # 给 robot-ops-dashboard 的对接说明
+  pre_n20_regression_check.md # N20 接入前通信负载回归检查
 ```
 
 ## 当前数据流
@@ -64,7 +72,30 @@ ROS 2 /motor/target_rpm (std_msgs/Float32)
   -> shared motor command
   -> motor_control_task (Core 1)
   -> mock motor response
-  -> /motor/actual_rpm + /motor/state
+  -> /motor/status + /motor/actual_rpm + /motor/state
+
+Dashboard 电机控制链路
+robot-ops-dashboard frontend
+  -> backend POST /api/robot/motor/cmd
+  -> MQTT robot/motor/cmd
+  -> ros2/robot_mqtt_bridge
+  -> ROS 2 /motor/cmd
+  -> ESP32 shared motor command
+  -> motor_control_task (enable / max_pwm / timeout / stop)
+
+Dashboard IMU 链路
+ROS 2 /imu/data 或 /imu/filtered
+  -> robot-ops-dashboard/scripts/microros_imu_to_mqtt_bridge.py
+  -> MQTT robot/imu
+  -> dashboard backend
+  -> robot-ops-dashboard frontend
+
+Dashboard 电机链路
+ROS 2 /motor/status
+  -> ros2/robot_mqtt_bridge
+  -> MQTT robot/motor/status
+  -> dashboard backend
+  -> robot-ops-dashboard frontend
 ```
 
 ## 当前接口
@@ -77,8 +108,15 @@ ROS 2 /motor/target_rpm (std_msgs/Float32)
   - `/robot/state`：`std_msgs/msg/Int32`，`best_effort`
   - `/cmd_vel`：`geometry_msgs/msg/Twist`，ESP32 侧默认 `reliable` 订阅
   - `/motor/target_rpm`：`std_msgs/msg/Float32`，ESP32 侧默认 `reliable` 订阅
+  - `/motor/cmd`：`std_msgs/msg/String`，ESP32 侧默认 `reliable` 订阅，携带 enable / max_pwm / timeout / stop 约束后的电机命令 JSON
+  - `/motor/status`：`std_msgs/msg/String`，当前主电机状态 JSON 字符串
   - `/motor/actual_rpm`：`std_msgs/msg/Float32`，当前为 mock motor response
-  - `/motor/state`：`std_msgs/msg/String`，当前为 mock motor state JSON 字符串
+  - `/motor/state`：`std_msgs/msg/String`，兼容旧调试链路的电机状态 JSON 字符串
+- dashboard backend 输入：
+  - `robot/imu`：由 `robot-ops-dashboard/scripts/microros_imu_to_mqtt_bridge.py` 从 ROS 2 IMU topic 低频镜像
+  - `robot/motor/status`：由 `ros2/robot_mqtt_bridge` 从 `/motor/status` 转发
+- dashboard backend 输出：
+  - `robot/motor/cmd`：由 `robot-ops-dashboard` backend 发布，经过 `ros2/robot_mqtt_bridge` 转成 `/motor/cmd`
 
 ## 快速开始
 
@@ -91,11 +129,22 @@ cp include/wifi_config.example.h include/wifi_config.h
 
 编辑 `include/wifi_config.h`，填入你当前网络的 SSID、密码和 Agent 地址。真实凭据不要提交到 Git。
 
-### 2. 启动 micro-ROS Agent
+### 2. Start micro-ROS Agent
+
+micro-ROS Agent 是外部依赖，不把源码或 `micro_ros_setup` vendor 到本仓库。默认推荐外部 workspace 使用 `~/uros_ws` 或 `~/micro_ros_ws`；如果路径不同，先设置 `MICRO_ROS_AGENT_SETUP` 指向对应的 `install/local_setup.bash`。
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
+cd /home/ina/Documents/PlatformIO/Projects/robot-state-monitor-v1
+./scripts/start_microros_agent_udp.sh
+```
+
+Agent 默认使用 UDP 端口 `8888`。启动 Agent 后再复位 ESP32，等待串口日志出现 `micro-ROS connected!`。
+
+接 N20 前必须先确认 micro-ROS Agent 和 topic 正常：
+
+```bash
+cd /home/ina/Documents/PlatformIO/Projects/robot-state-monitor-v1
+./scripts/check_microros_topics.sh
 ```
 
 ### 3. 构建并上传 ESP32
@@ -124,9 +173,11 @@ micro-ROS connected!
 ### 4. 构建 ROS 2 包
 
 ```bash
-cd /home/ina/ros2_ws
+cd /home/ina/Documents/PlatformIO/Projects/robot-state-monitor-v1
 source /opt/ros/jazzy/setup.bash
-colcon build --packages-select robot_state_monitor imu_data_logger
+colcon build --base-paths ros2 --packages-select \
+  robot_state_monitor imu_data_logger robot_mqtt_bridge \
+  --symlink-install
 source install/setup.bash
 ```
 
@@ -138,6 +189,8 @@ ros2 topic echo --once /imu/data
 ros2 topic echo --once /imu/filtered
 ros2 topic echo --once /robot/state
 ros2 topic info -v /cmd_vel
+ros2 topic echo --once /motor/cmd
+ros2 topic echo --once /motor/status
 ros2 topic echo --once /motor/actual_rpm
 ros2 topic echo --once /motor/state
 ```
@@ -156,6 +209,31 @@ Gazebo：
 ros2 launch robot_state_monitor mpu6050_gazebo.launch.py
 ```
 
+dashboard 电机 MQTT bridge：
+
+```bash
+ros2 run robot_mqtt_bridge motor_status_bridge --ros-args \
+  -p motor_status_topic:=/motor/status \
+  -p mqtt_host:=127.0.0.1 \
+  -p mqtt_port:=1883 \
+  -p mqtt_topic:=robot/motor/status
+
+ros2 run robot_mqtt_bridge motor_cmd_bridge --ros-args \
+  -p ros_cmd_topic:=/motor/cmd \
+  -p mqtt_host:=127.0.0.1 \
+  -p mqtt_port:=1883 \
+  -p mqtt_topic:=robot/motor/cmd
+```
+
+dashboard IMU MQTT bridge 目前位于外部仓库 `robot-ops-dashboard/scripts/microros_imu_to_mqtt_bridge.py`。
+
+整链一键启动与联调检查：
+
+```bash
+./scripts/start_motor_dashboard_stack.sh
+./scripts/check_motor_dashboard_loop.sh
+```
+
 ## 重要说明
 
 - `robot_state_monitor` 默认以 `best_effort` 订阅 `/imu/filtered`
@@ -163,15 +241,24 @@ ros2 launch robot_state_monitor mpu6050_gazebo.launch.py
 - `/imu/filtered` 只对线加速度和角速度做一阶低通，保留 STM32 原始姿态四元数
 - ESP32 默认不把训练 CSV 当作正式 IMU 输入
 - 当前默认不在运行态周期性 `ping` Agent
-- ESP32 本地电机闭环当前仍是 skeleton：已实现 `target_rpm` 接收、mock `actual_rpm`、`/motor/state`、host tests 和 TB6612 驱动边界，但真实 PWM / 编码器 / PID 还未接入
+- ESP32 本地电机控制当前已补齐 `/motor/cmd`、`/motor/status`、`robot/motor/cmd -> /motor/cmd` 主链路，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级约束；默认仍以 mock `actual_rpm` 验证闭环，TB6612 B 路真实输出保持 `kEnableMotorHardwareOutputs = false`，需要 bench 确认后再打开
+- 接真实 N20 前必须先通过 `docs/pre_n20_regression_check.md`：当前只验证双核任务隔离、发布限频、mock motor telemetry 和 `motor_control_task` jitter
+- STM32 可以继续 `100 Hz` 采样，但 ESP32 不需要把所有数据都 `100 Hz` 发布到 ROS 2；当前默认 `/imu/data` 为 `50 Hz`，`/imu/filtered` 为 `25 Hz`
+- ESP32 本地电机控制可以保持 `10 ms / 100 Hz`，但 ROS / MQTT / dashboard 状态回传必须降频；当前默认 `/motor/actual_rpm` 为 `20 Hz`，`/motor/status` 与 `/motor/state` JSON 为 `5 Hz`
 - 真实 WiFi 凭据只放在 `firmware/esp32_microros_bridge/include/wifi_config.h`，上传仓库只保留 `wifi_config.example.h`
 
 ## 相关文档
 
 - `docs/data-flow.md`
+- `docs/dashboard-integration.md`
+- `docs/robot_ops_dashboard_handoff.md`
+- `docs/microros_agent_startup.md`
+- `docs/pre_n20_regression_check.md`
 - `firmware/stm32_sensor_node/README.md`
 - `firmware/stm32_sensor_node/design.md`
 - `firmware/esp32_microros_bridge/README.md`
 - `firmware/esp32_microros_bridge/design.md`
 - `ros2/robot_state_monitor/README.md`
 - `ros2/imu_data_logger/README.md`
+- `ros2/robot_mqtt_bridge/README.md`
+- `archive/robot_status_api_bridge_legacy/README.md`

@@ -29,6 +29,11 @@ compile_and_run \
   "${repo_root}/test/host/test_motor_response_model.cpp"
 
 compile_and_run \
+  test_motor_command_parser \
+  "${repo_root}/src/bridge/motor_command_parser.cpp" \
+  "${repo_root}/test/host/test_motor_command_parser.cpp"
+
+compile_and_run \
   test_encoder_rpm_estimator \
   "${repo_root}/src/motor/encoder_rpm_estimator.cpp" \
   "${repo_root}/test/host/test_encoder_rpm_estimator.cpp"

@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 
 
-package_name = 'robot_status_api_bridge'
+package_name = 'robot_mqtt_bridge'
 
 
 setup(
@@ -10,14 +10,17 @@ setup(
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),
+         ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml', 'README.md']),
     ],
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+        'paho-mqtt',
+    ],
     zip_safe=True,
     maintainer='ina',
     maintainer_email='ina@example.com',
-    description='ROS 2 to dashboard backend robot status bridge.',
+    description='ROS 2 to MQTT bridge for robot dashboard telemetry.',
     license='Apache-2.0',
     extras_require={
         'test': [
@@ -26,8 +29,10 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'robot_status_bridge = '
-            'robot_status_api_bridge.status_bridge_node:main',
+            'motor_status_bridge = '
+            'robot_mqtt_bridge.motor_status_bridge_node:main',
+            'motor_cmd_bridge = '
+            'robot_mqtt_bridge.motor_cmd_bridge_node:main',
         ],
     },
 )

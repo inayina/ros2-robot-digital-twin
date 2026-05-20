@@ -7,9 +7,13 @@
 
 struct MotorResponseModelConfig {
     uint32_t command_timeout_ms;
+    uint32_t min_command_timeout_ms;
+    uint32_t max_command_timeout_ms;
     float response_alpha;
     float zero_epsilon_rpm;
     float max_abs_rpm;
+    float default_motor_cmd_max_pwm;
+    float max_command_max_pwm;
 };
 
 struct MotorResponseModelRuntime {

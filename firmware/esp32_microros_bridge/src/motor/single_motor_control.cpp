@@ -56,12 +56,16 @@ MotorControlStateSnapshot singleMotorControlUpdate(
     state.target_rpm = target_rpm;
     state.actual_rpm = actual_rpm;
     state.error_rpm = state.target_rpm - state.actual_rpm;
+    state.max_pwm_limit = 1.0f;
     state.updated_ms = now_ms;
     state.loop_count = loop_count;
     state.last_command_sequence = command.sequence;
+    state.command_timeout_ms = config.command_timeout_ms;
     state.active_source = timeout_active ? MotorCommandSource::kNone : command.source;
     state.direction = directionForRpm(state.target_rpm);
+    state.enabled = target_rpm_active;
     state.control_enabled = target_rpm_active;
+    state.closed_loop = target_rpm_active;
     state.timeout_active = timeout_active;
     state.legacy_bridge_active =
         !timeout_active && command.source == MotorCommandSource::kLegacyCmdVel;

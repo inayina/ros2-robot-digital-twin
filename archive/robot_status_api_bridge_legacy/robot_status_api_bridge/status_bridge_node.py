@@ -15,8 +15,12 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.qos import QoSProfile
 from rclpy.qos import QoSReliabilityPolicy
+from robot_status_api_bridge.mqtt_status_publisher import MqttStatusPublisher
+from robot_status_api_bridge.payload_builder import build_mqtt_topic_payloads
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Float32
 from std_msgs.msg import Int32
+from std_msgs.msg import String
 
 
 ROBOT_STATE_LABELS = {
@@ -43,6 +47,24 @@ class RobotStateSnapshot:
 
     topic: str
     value: Optional[int] = None
+    received_time_sec: Optional[float] = None
+
+
+@dataclass
+class MotorRpmSnapshot:
+    """Hold the latest motor actual RPM value."""
+
+    topic: str
+    value: Optional[float] = None
+    received_time_sec: Optional[float] = None
+
+
+@dataclass
+class MotorStateSnapshot:
+    """Hold the latest motor state value."""
+
+    topic: str
+    value: Optional[str] = None
     received_time_sec: Optional[float] = None
 
 
@@ -121,7 +143,7 @@ def _resolve_output_path(configured_path):
 
 
 class RobotStatusApiBridgeNode(Node):
-    """Aggregate ROS 2 robot state into a dashboard status file."""
+    """Aggregate ROS 2 robot state into dashboard status outputs."""
 
     def __init__(self):
         """Create subscriptions, timers, and output paths."""
@@ -139,6 +161,10 @@ class RobotStatusApiBridgeNode(Node):
         self.declare_parameter('enable_http_post', False)
         self.declare_parameter('http_endpoint', '')
         self.declare_parameter('http_timeout_sec', 2.0)
+        self.declare_parameter('enable_mqtt_publish', False)
+        self.declare_parameter('mqtt_host', '127.0.0.1')
+        self.declare_parameter('mqtt_port', 1883)
+        self.declare_parameter('mqtt_topic_prefix', 'robot')
 
         self.raw_imu_topic = self._get_string_parameter('raw_imu_topic')
         self.filtered_imu_topic = self._get_string_parameter(
@@ -164,13 +190,34 @@ class RobotStatusApiBridgeNode(Node):
                 'publish_rate_hz must be positive; falling back to 1.0 Hz')
             self.publish_rate_hz = 1.0
 
+        self.declare_parameter(
+            'mqtt_publish_rate_hz',
+            self.publish_rate_hz)
+
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.enable_mqtt_publish = bool(
+            self.get_parameter('enable_mqtt_publish').value)
+        self.mqtt_host = self._get_string_parameter('mqtt_host')
+        self.mqtt_port = int(self.get_parameter('mqtt_port').value)
+        self.mqtt_topic_prefix = self._get_string_parameter(
+            'mqtt_topic_prefix')
+        self.mqtt_publish_rate_hz = float(
+            self.get_parameter('mqtt_publish_rate_hz').value)
+        if self.mqtt_publish_rate_hz <= 0.0:
+            self.get_logger().warn(
+                'mqtt_publish_rate_hz must be positive; falling back to '
+                'publish_rate_hz')
+            self.mqtt_publish_rate_hz = self.publish_rate_hz
 
         self.raw_imu = ImuSnapshot(topic=self.raw_imu_topic)
         self.filtered_imu = ImuSnapshot(topic=self.filtered_imu_topic)
         self.robot_state = RobotStateSnapshot(topic=self.robot_state_topic)
+        self.motor_actual_rpm = MotorRpmSnapshot(topic='/motor/actual_rpm')
+        self.motor_state = MotorStateSnapshot(topic='/motor/state')
         self._invalid_orientation_topics = set()
         self._http_endpoint_warned = False
+        self.mqtt_status_publisher = None
 
         self._subscriptions = [
             self.create_subscription(
@@ -190,21 +237,48 @@ class RobotStatusApiBridgeNode(Node):
                 QoSProfile(
                     depth=10,
                     reliability=QoSReliabilityPolicy.BEST_EFFORT)),
+            self.create_subscription(
+                Float32,
+                self.motor_actual_rpm.topic,
+                self._handle_motor_actual_rpm,
+                qos_profile_sensor_data),
+            self.create_subscription(
+                String,
+                self.motor_state.topic,
+                self._handle_motor_state,
+                QoSProfile(
+                    depth=10,
+                    reliability=QoSReliabilityPolicy.BEST_EFFORT)),
         ]
 
         self.timer = self.create_timer(
             1.0 / self.publish_rate_hz,
             self._publish_status)
         self._publish_status()
+        self.mqtt_timer = None
+        if self.enable_mqtt_publish:
+            self.mqtt_status_publisher = MqttStatusPublisher(
+                self.mqtt_host,
+                self.mqtt_port,
+                self.mqtt_topic_prefix,
+                self.get_logger())
+            self.mqtt_timer = self.create_timer(
+                1.0 / self.mqtt_publish_rate_hz,
+                self._publish_mqtt_status)
+            self._publish_mqtt_status()
 
         self.get_logger().info(
             f'Writing robot status snapshots to {self.output_path}')
         self.get_logger().info(
             f'Subscribed to {self.raw_imu_topic}, '
-            f'{self.filtered_imu_topic}, and {self.robot_state_topic}')
+            f'{self.filtered_imu_topic}, {self.robot_state_topic}, '
+            f'{self.motor_actual_rpm.topic}, and {self.motor_state.topic}')
         if self.enable_http_post:
             self.get_logger().info(
                 'Optional HTTP POST bridge enabled for dashboard backend')
+        if self.enable_mqtt_publish:
+            self.get_logger().info(
+                'Optional MQTT status publish enabled for dashboard backend')
 
     def _get_string_parameter(self, name):
         """Return a declared string parameter."""
@@ -246,6 +320,16 @@ class RobotStatusApiBridgeNode(Node):
         """Store the latest robot_state message."""
         self.robot_state.value = int(msg.data)
         self.robot_state.received_time_sec = self._now_seconds()
+
+    def _handle_motor_actual_rpm(self, msg):
+        """Store the latest motor actual RPM message."""
+        self.motor_actual_rpm.value = float(msg.data)
+        self.motor_actual_rpm.received_time_sec = self._now_seconds()
+
+    def _handle_motor_state(self, msg):
+        """Store the latest motor state message."""
+        self.motor_state.value = str(msg.data)
+        self.motor_state.received_time_sec = self._now_seconds()
 
     def _select_imu_snapshot(self):
         """Return the freshest available IMU snapshot."""
@@ -379,20 +463,14 @@ class RobotStatusApiBridgeNode(Node):
                 self.robot_state.topic,
                 self.robot_state.received_time_sec,
                 self.robot_state_stale_timeout_sec),
-            'motor_state': {
-                'topic': '/motor/state',
-                'status': 'reserved',
-                'age_sec': None,
-                'last_received_time': None,
-                'last_header_stamp': None,
-            },
-            'motor_actual_rpm': {
-                'topic': '/motor/actual_rpm',
-                'status': 'reserved',
-                'age_sec': None,
-                'last_received_time': None,
-                'last_header_stamp': None,
-            },
+            'motor_state': self._build_source_payload(
+                self.motor_state.topic,
+                self.motor_state.received_time_sec,
+                self.robot_state_stale_timeout_sec),
+            'motor_actual_rpm': self._build_source_payload(
+                self.motor_actual_rpm.topic,
+                self.motor_actual_rpm.received_time_sec,
+                self.robot_state_stale_timeout_sec),
         }
 
         return {
@@ -407,12 +485,24 @@ class RobotStatusApiBridgeNode(Node):
                     None if self.robot_state.value is None
                     else _robot_state_label(self.robot_state.value)),
             },
+            'motor': {
+                'actual_rpm': self.motor_actual_rpm.value,
+                'motor_state': self.motor_state.value,
+            },
             'health_status': self._build_health_status(source_payloads),
             'last_update_time': _unix_to_iso8601(now_sec),
             'output_mode': 'json_file',
             'http_post': {
                 'enabled': self.enable_http_post,
                 'endpoint': self.http_endpoint if self.enable_http_post else '',
+            },
+            'mqtt_publish': {
+                'enabled': self.enable_mqtt_publish,
+                'host': self.mqtt_host if self.enable_mqtt_publish else '',
+                'port': self.mqtt_port if self.enable_mqtt_publish else None,
+                'topic_prefix': (
+                    self.mqtt_topic_prefix if self.enable_mqtt_publish
+                    else ''),
             },
         }
 
@@ -462,11 +552,29 @@ class RobotStatusApiBridgeNode(Node):
         except URLError as exc:
             self.get_logger().warn(f'Failed to POST robot status: {exc}')
 
+    def _publish_mqtt_status(self):
+        """Optionally publish the latest robot status snapshot to MQTT."""
+        if not self.enable_mqtt_publish:
+            return
+
+        if self.mqtt_status_publisher is None:
+            return
+
+        payload = self._build_payload()
+        self.mqtt_status_publisher.publish_payloads(
+            build_mqtt_topic_payloads(payload))
+
     def _publish_status(self):
         """Write the latest robot status snapshot and POST if enabled."""
         payload = self._build_payload()
         self._write_payload(payload)
         self._post_payload(payload)
+
+    def destroy_node(self):
+        """Stop optional publishers before destroying the ROS node."""
+        if self.mqtt_status_publisher is not None:
+            self.mqtt_status_publisher.stop()
+        return super().destroy_node()
 
 
 def main(args=None):

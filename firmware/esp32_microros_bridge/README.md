@@ -24,25 +24,27 @@
 当前运行时已经拆成双核骨架：
 
 - Core 0：`ros_comm_task`
-  负责 WiFi、micro-ROS、STM32 串口解析、`/cmd_vel` legacy bridge、`/motor/target_rpm` 接收
+  负责 WiFi、micro-ROS、STM32 串口解析、`/cmd_vel` legacy bridge、`/motor/target_rpm` 和 `/motor/cmd` 接收
 - Core 1：`motor_control_task`
-  负责电机控制循环、命令超时检查、mock rpm 响应和共享状态更新
+  负责电机控制循环、`enable/max_pwm/timeout/stop` 安全检查、mock rpm 响应和共享状态更新
 
 当前已实现的话题：
 
 - 发布 `/imu/data`：`sensor_msgs/msg/Imu`
 - 发布 `/imu/filtered`：`sensor_msgs/msg/Imu`
 - 发布 `/robot/state`：`std_msgs/msg/Int32`
+- 发布 `/motor/status`：`std_msgs/msg/String`
 - 发布 `/motor/actual_rpm`：`std_msgs/msg/Float32`
 - 发布 `/motor/state`：`std_msgs/msg/String`
 - 订阅 `/cmd_vel`：`geometry_msgs/msg/Twist`
 - 订阅 `/motor/target_rpm`：`std_msgs/msg/Float32`
+- 订阅 `/motor/cmd`：`std_msgs/msg/String`
 
 ## 当前路线
 
 电机闭环控制主线迁移到 ESP32：当前 TB6612 A 通道保留给 130 普通电机做驱动通道辅助验证，TB6612 B 通道承担单 6V N20 编码器减速电机闭环主线。单 N20 跑通后，再购买第二个同规格 N20，把 A 通道从 130 切换为 N20 扩展双轮差速。STM32 既有 open-loop motor control 仅保留为 legacy experiment / early validation，不再继续扩展为编码器读取、PID 调速、双轮差速或 `ros2_control` 主线。详细架构见 [docs/design.md](docs/design.md) 和 [docs/motor_control_design.md](docs/motor_control_design.md)。
 
-当前代码已经实现双核任务框架、`target_rpm` 命令入口、mock `actual_rpm` 响应、`/motor/state` 发布和 TB6612 驱动文件骨架，但真实 PWM / 编码器 / PID 硬件闭环还没有接入，现阶段仍属于 motor-control skeleton。
+当前代码已经实现双核任务框架、`/motor/target_rpm` 与 `/motor/cmd` 命令入口、mock `actual_rpm` 响应、`/motor/status` 与 `/motor/state` 发布，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级安全约束。TB6612 B 路真实输出代码已接到 `motorControllerApplyHardwareOutputs()`，但默认 `kEnableMotorHardwareOutputs = false`，bench 确认前不会自动驱动实物。
 
 130 普通电机 A 通道 bench test 已保留为可开关调试项：
 
@@ -54,6 +56,15 @@
 - 打开后，上电会低占空比正转短脉冲、coast、低占空比反转短脉冲、最后禁用 STBY
 
 当前接线规划是 TB6612 A 通道保留 130、TB6612 B 通道先做 N20；ESP32 具体 GPIO 到 TB6612 / 编码器的规划见 [docs/motor_control_design.md](docs/motor_control_design.md)。
+
+单 N20 编码器速度闭环 bench 也已落地为本地可开关测试能力：
+
+- `kEnableN20ClosedLoopBench = false`
+- 只占用 TB6612 B 通道和 `GPIO10/GPIO11` 编码器输入
+- 不接 `ROS 2 /cmd_vel`
+- 不改已有 micro-ROS topic / 串口协议
+- 打开后按时间 profile 自动做速度阶跃，并输出 CSV 风格日志
+- 当前测试与调参记录见 [docs/n20_closed_loop_bench_tuning.md](docs/n20_closed_loop_bench_tuning.md)
 
 ## 代码结构
 
@@ -68,9 +79,11 @@
 - `ros/uros_pub.[h/cpp]`
   上行 publisher，负责 IMU / robot state 和 mock motor state 发布
 - `ros/uros_sub.[h/cpp]`
-  下行 subscriber，负责 `/cmd_vel`、`/motor/target_rpm` 和 executor
+  下行 subscriber，负责 `/cmd_vel`、`/motor/target_rpm`、`/motor/cmd` 和 executor
 - `bridge/stm32_serial_parser.[h/cpp]`
   STM32 上行串口协议解析
+- `bridge/motor_command_parser.[h/cpp]`
+  `/motor/cmd` JSON 解析，提取 `target_rpm`、`enabled`、`closed_loop`、`max_pwm`、`timeout_ms`、`stop`
 - `motor/motor_control_shared.[h/cpp]`
   Core 0 / Core 1 之间的共享命令与状态快照
 - `motor/motor_controller.[h/cpp]`
@@ -89,7 +102,7 @@
 这样拆开后：
 
 - `uros_pub` 不再混订阅逻辑
-- `uros_sub` 可以继续扩 `ESTOP`、enable 等下行接口
+- `uros_sub` 现在已经承接 `/motor/cmd`，后续继续扩更细的下行接口时，优先保持 JSON 字段兼容
 - `uros_core` 统一管理 node/support，避免 pub/sub 各自重复持有
 
 ## 硬件连接
@@ -127,7 +140,62 @@ ESP32 侧的配置分两层：
 - `[IMU ...]`
 - `[CMDVEL] ...`
 - `[STM32] ...`
-- `System running normally ...`
+- `[RUNTIME] ...`
+
+当前 ROS 发布限频也集中在 [app_config.h](src/config/app_config.h)：
+
+- `/imu/data`：默认 `50 Hz`
+- `/imu/filtered`：默认 `25 Hz`
+- `/robot/state`：默认 `10 Hz`
+- `/motor/status` JSON：默认 `5 Hz`
+- `/motor/actual_rpm`：默认 `20 Hz`
+- `/motor/state` JSON：默认 `5 Hz`
+- `[RUNTIME]` 统计日志：默认 `10 s`
+
+### 单 N20 编码器闭环阶跃 bench
+
+当前 bench 相关配置也集中在 [app_config.h](src/config/app_config.h)：
+
+- `kEnableN20ClosedLoopBench`
+- `kN20ClosedLoopBenchControlPeriodMs`
+- `kN20ClosedLoopBenchPrintIntervalMs`
+- `kN20ClosedLoopBenchMaxPwm`
+- `kN20ClosedLoopBenchKp / Ki / Kd`
+- `kN20ClosedLoopBenchIntegralMin / Max`
+- `kN20ClosedLoopBenchProfileStep*StartMs`
+- `kN20ClosedLoopBenchProfileStep*TargetTicksPerSec`
+
+默认阶跃 profile：
+
+- `0-2s`：`0 ticks/s`
+- `2-6s`：`500 ticks/s`
+- `6-10s`：`800 ticks/s`
+- `10-14s`：`1000 ticks/s`
+- `14-18s`：`500 ticks/s`
+- `18s` 后：`0 ticks/s`
+
+串口日志输出为 CSV：
+
+```text
+timestamp_ms,target_ticks_per_sec,measured_ticks_per_sec,pwm,error,encoder_count,invalid_transitions
+2059,500.000,160.000,0.063,340.000,-8,0
+6159,800.000,400.000,0.092,400.000,-1152,0
+10159,1000.000,560.000,0.099,440.000,-2990,0
+14059,500.000,180.000,0.078,320.000,-5204,0
+```
+
+运行方法：
+
+1. 在 [app_config.h](src/config/app_config.h) 中把 `kEnableN20ClosedLoopBench` 临时改为 `true`
+2. 运行 `~/.platformio/penv/bin/pio run --target upload --upload-port /dev/ttyACM0`
+3. 打开 `pio device monitor -b 921600 --port /dev/ttyACM0`
+4. 复制 CSV 日志到表格或脚本做阶跃响应曲线
+5. 测试结束后把 `kEnableN20ClosedLoopBench` 改回 `false` 并重新烧录安全版
+
+说明：
+
+- bench 模式会压掉本地 IMU / runtime 高频调试，尽量让串口以 CSV 为主
+- 如果没启动 micro-ROS Agent，启动阶段仍可能看到少量 WiFi / micro-ROS 重连提示，这些不影响 CSV 行本身
 
 STM32 侧串口调试开关集中在：
 
@@ -183,10 +251,12 @@ CMDVEL,0.000,1.000
   线加速度与角速度的一阶低通滤波结果
 - `/robot/state`
   STM32 推理得到的状态值
+- `/motor/status`
+  当前主电机状态字符串，包含 target / measured / pwm / enabled / fault 等字段
 - `/motor/actual_rpm`
   当前 mock motor response 得到的实际转速估计
 - `/motor/state`
-  当前 mock 电机状态字符串，包含 target / actual / error / timeout 等字段
+  兼容旧调试链路的电机状态字符串，字段与 `/motor/status` 保持一致
 
 ### 订阅话题
 
@@ -202,7 +272,7 @@ CMDVEL,0.000,1.000
 
 编码成 `CMDVEL` 文本帧，经 `UART1` 发给 STM32。
 
-收到 `/motor/target_rpm` 后，ESP32 会把目标转速写入 Core 0 / Core 1 共享命令。当前 `motor_control_task` 先用 mock response 模拟 `actual_rpm` 追踪 `target_rpm`，并通过 `/motor/actual_rpm` 和 `/motor/state` 回传状态；N20 到货并实测后，再把 mock response 替换为真实 encoder/PID 反馈。
+收到 `/motor/target_rpm` 后，ESP32 会把目标转速写入 Core 0 / Core 1 共享命令。当前 `motor_control_task` 先用 mock response 模拟 `actual_rpm` 追踪 `target_rpm`，并通过 `/motor/status`、`/motor/actual_rpm` 和 `/motor/state` 回传状态；N20 到货并实测后，再把 mock response 替换为真实 encoder/PID 反馈。
 
 ## 连接恢复
 

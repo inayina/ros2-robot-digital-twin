@@ -2,102 +2,130 @@
 
 ## Boundary
 
-Dashboard frontend 不直接连接 ROS 2、ESP32 或 MQTT。
+Dashboard frontend 不直接连接 ROS 2、ESP32 或 micro-ROS runtime。
 
 当前建议的边界是：
 
-- ROS 2 侧负责采集和聚合底层机器人状态
-- dashboard backend 负责统一接入 AMR task status、`robot_state`、
-  `imu_state`、`motor_state`
-- dashboard frontend 只调用 dashboard backend 提供的 HTTP API
+- ROS 2 侧负责采集和整理底层 topic
+- ROS 2 -> MQTT bridge 负责把低频状态镜像到 dashboard topic
+- dashboard backend 负责统一订阅 MQTT、对外提供 HTTP API 与 `/ws/status`
+- dashboard frontend 只调用 dashboard backend
 
-这样可以把机器人侧通信细节、topic/QoS、串口和 bridge 逻辑都收口在
-backend 之前，避免把 frontend 绑死在 ROS 2 runtime 上。
+这样可以把 ROS graph、串口、QoS、Agent 与设备细节都收口在 backend 之前。
 
-## Current Phase
+## Current Main Path
 
-当前阶段使用 `ros2/robot_status_api_bridge/` 作为 ROS 2 到 dashboard
-backend 的最小状态桥。
+当前已经收束到两条状态主链路和一条控制主链路：
 
-它订阅：
+```text
+IMU:
+ROS 2 /imu/data or /imu/filtered
+  -> robot-ops-dashboard/scripts/microros_imu_to_mqtt_bridge.py
+  -> MQTT robot/imu
+  -> dashboard backend
+  -> frontend
 
-- `/imu/data`
-- `/imu/filtered`
-- `/robot/state`
+Motor:
+ROS 2 /motor/status
+  -> ros2/robot_mqtt_bridge
+  -> MQTT robot/motor/status
+  -> dashboard backend
+  -> frontend
 
-它输出：
+Motor Cmd:
+frontend
+  -> dashboard backend POST /api/robot/motor/cmd
+  -> MQTT robot/motor/cmd
+  -> ros2/robot_mqtt_bridge
+  -> ROS 2 /motor/cmd
+  -> ESP32 motor_control_task
+```
 
-- `data/dashboard_state/latest_robot_status.json`
+其中：
 
-这个 JSON 文件是当前阶段给 dashboard backend 的最小集成面。backend
-可以轮询读取，或者在后续版本中由可选 HTTP POST 接口接收。
+- `robot/imu` 的 bridge 当前维护在 `robot-ops-dashboard` 仓库
+- `robot/motor/status` 的 bridge 当前维护在本仓库 `ros2/robot_mqtt_bridge`
+- 已归档的 `archive/robot_status_api_bridge_legacy/` 不再是当前主链路
 
-## Data Ownership
+## Topics And Ownership
 
-dashboard backend 是统一汇聚层，负责把多路机器人与业务状态整理成稳定的
-前端接口。当前建议由 backend 统一聚合这些数据面：
+当前 dashboard 相关状态来源建议分工：
+
+- `/imu/data`、`/imu/filtered`：ROS 2 原始 IMU 数据源
+- `/motor/status`：ESP32 发布的主电机状态 JSON
+- `/motor/cmd`：ESP32 订阅的主电机控制 JSON
+- `/motor/actual_rpm`、`/motor/state`：兼容旧调试与 bench 验证链路
+- `robot/imu`：dashboard backend 消费的 IMU MQTT topic
+- `robot/motor/status`：dashboard backend 消费的 motor MQTT topic
+- `robot/motor/cmd`：dashboard backend 发布的 motor MQTT command topic
+
+推荐由 backend 统一聚合这些数据面：
 
 - `amr_task_status`
 - `robot_state`
 - `imu_state`
 - `motor_state`
 
-其中：
+frontend 面向的是业务稳定接口，不需要理解 ROS 2 话题名、QoS 或 micro-ROS Agent。
 
-- `robot_state` 当前来自 STM32 `AlgTask` 的低频状态判别，经 ESP32
-  micro-ROS bridge 发布为 `/robot/state`
-- `imu_state` 当前来自 `/imu/data` 和 `/imu/filtered`
-- `motor_state` 后续可从 `/motor/state`、`/motor/actual_rpm` 接入
+## Motor Payload
 
-这样 frontend 面向的是业务稳定接口，不需要理解 ROS 2 话题命名、QoS、
-topic 类型或设备在线细节。
+`robot/motor/status` 当前建议至少包含这些字段：
+
+- `actual_rpm`
+- `measured_rpm`
+- `target_rpm`
+- `error_rpm`
+- `pwm`
+- `pwm_duty`
+- `enabled`
+- `control_enabled`
+- `closed_loop`
+- `fault`
+- `timeout`
+- `estop`
+- `motor_state`
+- `last_update_time`
+
+其中 `motor_state` 建议保留为结构化对象，方便 dashboard 继续兼容现有容错解析逻辑。
 
 ## Transport Strategy
 
-当前阶段前后端仍使用 HTTP polling。
-
-建议链路如下：
+当前 dashboard 主链路采用 MQTT + backend HTTP/WebSocket：
 
 ```text
 STM32 / ESP32
   -> ROS 2 topics
-  -> robot_status_api_bridge
-  -> latest_robot_status.json
+  -> ROS 2 -> MQTT bridge
+  -> MQTT broker
   -> dashboard backend
-  -> HTTP API
+  -> HTTP API + /ws/status
   -> dashboard frontend
 ```
 
-原因是：
-
-- 当前目标是先把状态聚合链路跑通，而不是提前引入实时推送复杂度
-- polling 更容易调试、回放和做容错
-- backend 可以在读取 JSON 后再补充 task status、业务状态和鉴权逻辑
-
-## Future Extensions
-
-WebSocket 是后续的实时推送增强，而不是当前阶段的默认前后端接口。
-
-推荐演进顺序是：
-
-1. 先稳定 ROS 2 -> backend 状态聚合和 HTTP polling
-2. 再在 backend 层增加 WebSocket 推送，用于更低延迟的 dashboard 刷新
-3. 再根据需要增加 MQTT 低频状态镜像
-
-MQTT 只作为未来低频状态镜像，不进入实时控制链路。
-
 这意味着：
 
-- 不把 MQTT 作为当前 dashboard 主链路
-- 不让 dashboard 或 MQTT 参与实时控制闭环
-- 不把 `cmd_vel`、电机控制、急停等链路依赖在 MQTT 上
+- dashboard frontend 不直接消费 ROS 2
+- backend 仍是统一汇聚层
+- MQTT 承载低频状态镜像和低频人工命令，不参与实时 PID 闭环
+- 电机控制命令必须经过 backend，不从 frontend 直连 ROS 2
 
-## Non-Goals
+## Archived Path
 
-当前阶段明确不做这些事情：
+`archive/robot_status_api_bridge_legacy/` 已归档，原因是：
 
-- 不修改 `firmware/stm32_sensor_node`
-- 不修改 `firmware/esp32_microros_bridge` 的稳定 IMU 主链路
-- 不把 dashboard bridge 放进 `imu_data_logger`
-- 不让 dashboard frontend 直接连接 ROS 2
-- 不把 MQTT 引入为当前主链路
+- 旧链路以 `latest_robot_status.json` 为中心
+- 当前 `robot-ops-dashboard` 的 IMU 前端链路已经不依赖它
+- 继续在旧包里混合 JSON 文件、HTTP POST、MQTT 状态镜像，会让职责边界继续发散
+
+如果需要回看旧实验或兼容旧 JSON 轮询方案，可以查归档目录；当前新开发不再往该目录追加功能。
+
+## Handoff
+
+如果接下来要对接 `robot-ops-dashboard`，优先阅读：
+
+- [motor_dashboard_interface.md](motor_dashboard_interface.md)
+- [motor_dashboard_progress_2026_05_20.md](motor_dashboard_progress_2026_05_20.md)
+- [robot_ops_dashboard_handoff.md](robot_ops_dashboard_handoff.md)
+- [data-flow.md](data-flow.md)
+- [ros2/robot_mqtt_bridge/README.md](../ros2/robot_mqtt_bridge/README.md)

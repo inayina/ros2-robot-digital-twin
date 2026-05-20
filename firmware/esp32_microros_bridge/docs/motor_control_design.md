@@ -255,6 +255,7 @@ N20 encoder power -> logic-side power after voltage-level confirmation
 - encoder rpm estimator、speed PID、single motor control 纯逻辑模块已落地
 - TB6612 driver 文件已落地，提供 A/B 双通道 PWM/DIR/STBY 可配置接口
 - 已保留 130 普通电机 A 通道 bench test，用于验证 TB6612 `PWMA/AIN1/AIN2/STBY`，默认关闭
+- 已新增单 N20 编码器速度闭环 step-response bench，本地读取 `GPIO10/GPIO11`、驱动 TB6612 B 通道、输出 CSV 调参日志，默认关闭
 - 当前仍未接入真实 PWM、编码器和 PID 执行
 
 ### 6.1 Core 1: Motor-Control Core
