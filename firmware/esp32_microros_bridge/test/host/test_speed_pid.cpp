@@ -55,7 +55,7 @@ void test_reset_clears_integral() {
     SpeedPidRuntime runtime = {};
     speedPidInit(runtime);
 
-    speedPidUpdate(runtime, makeConfig(), 100.0f, 0.0f, 100U);
+    speedPidUpdate(runtime, makeConfig(), 20.0f, 0.0f, 100U);
     assert(runtime.integral > 0.0f);
 
     speedPidReset(runtime);

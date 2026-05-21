@@ -13,51 +13,66 @@ Dashboard frontend 不直接连接 ROS 2、ESP32 或 micro-ROS runtime。
 
 这样可以把 ROS graph、串口、QoS、Agent 与设备细节都收口在 backend 之前。
 
+这个仓库已经和 `robot-ops-dashboard` 做过一轮联调，所以当前文档不再按“监控优先”表述。更准确的口径是：`2` 条交互链路 + `1` 条只读链路。
+
 ## Current Main Path
 
-当前已经收束到两条状态主链路和一条控制主链路：
+当前已经收束到下面三条对外链路：
 
 ```text
-IMU:
-ROS 2 /imu/data or /imu/filtered
-  -> robot-ops-dashboard/scripts/microros_imu_to_mqtt_bridge.py
-  -> MQTT robot/imu
-  -> dashboard backend
-  -> frontend
+Interactive 1:
+amr_warehouse_sim Mock WMS
+  -> /home/ina/ros2_ws/src/amr_warehouse_sim
+  -> SQLite / CLI / HTTP API
+  -> mock_wms_executor / mock_wms_task_runner
+  -> dashboard/backend task-state interaction
 
-Motor:
-ROS 2 /motor/status
-  -> ros2/robot_mqtt_bridge
-  -> MQTT robot/motor/status
-  -> dashboard backend
-  -> frontend
-
-Motor Cmd:
+Interactive 2:
 frontend
   -> dashboard backend POST /api/robot/motor/cmd
   -> MQTT robot/motor/cmd
   -> ros2/robot_mqtt_bridge
   -> ROS 2 /motor/cmd
   -> ESP32 motor_control_task
+
+Read-only:
+ROS 2 /imu/data or /imu/filtered
+  -> robot-ops-dashboard/scripts/microros_imu_to_mqtt_bridge.py
+  -> MQTT robot/imu
+  -> dashboard backend
+  -> frontend
+ROS 2 /motor/status
+  -> ros2/robot_mqtt_bridge
+  -> MQTT robot/motor/status
+  -> dashboard backend
+  -> frontend
 ```
+
+补充：
+
+- `ROS 2 /cmd_vel -> ESP32 -> STM32` 仍保留为 legacy 本地控制 / 验证链路
+- 但它不再作为这里的 “Interactive 1”
 
 其中：
 
 - `robot/imu` 的 bridge 当前维护在 `robot-ops-dashboard` 仓库
 - `robot/motor/status` 的 bridge 当前维护在本仓库 `ros2/robot_mqtt_bridge`
+- WMS 任务态链路当前来自 `/home/ina/ros2_ws/src/amr_warehouse_sim`，不是一个未落地的占位概念
 - 已归档的 `archive/robot_status_api_bridge_legacy/` 不再是当前主链路
 
 ## Topics And Ownership
 
-当前 dashboard 相关状态来源建议分工：
+当前 dashboard 相关来源建议按“2 交互 + 1 只读”理解：
 
-- `/imu/data`、`/imu/filtered`：ROS 2 原始 IMU 数据源
+- `amr_warehouse_sim Mock WMS -> backend`：任务态 / 调度态交互入口
+- `/motor/cmd`：主电机控制交互入口
+- `/imu/data`、`/imu/filtered`：只读 IMU 数据源
 - `/motor/status`：ESP32 发布的主电机状态 JSON
-- `/motor/cmd`：ESP32 订阅的主电机控制 JSON
 - `/motor/actual_rpm`、`/motor/state`：兼容旧调试与 bench 验证链路
 - `robot/imu`：dashboard backend 消费的 IMU MQTT topic
 - `robot/motor/status`：dashboard backend 消费的 motor MQTT topic
 - `robot/motor/cmd`：dashboard backend 发布的 motor MQTT command topic
+- `/cmd_vel`：额外保留的 legacy 本地控制入口，不计入当前对外 `2` 条交互链路
 
 推荐由 backend 统一聚合这些数据面：
 

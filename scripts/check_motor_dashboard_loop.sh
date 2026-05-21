@@ -121,6 +121,15 @@ topic_publisher_count() {
   ros2 topic info -v "$topic" | sed -n 's/^Publisher count: //p'
 }
 
+topic_subscription_count() {
+  local topic=$1
+  set +u
+  source "$ROS_SETUP"
+  source "$WORKSPACE_SETUP"
+  set -u
+  ros2 topic info -v "$topic" | sed -n 's/^Subscription count: //p'
+}
+
 check_backend() {
   local health_json
   local status_json
@@ -163,19 +172,40 @@ check_imu_mqtt() {
 check_motor_cmd_loop() {
   local echo_file
   local echo_pid
+  local status_file
+  local status_pid
   local cmd_response
   echo_file="$(mktemp)"
+  status_file="$(mktemp)"
 
   (
     set +u
     source "$ROS_SETUP"
     source "$WORKSPACE_SETUP"
     set -u
-    timeout 12s ros2 topic echo /motor/cmd >"$echo_file"
+    timeout 20s ros2 --use-python-default-buffering topic echo --once /motor/cmd >"$echo_file"
   ) &
   echo_pid=$!
 
-  sleep 2
+  (
+    set +u
+    source "$ROS_SETUP"
+    source "$WORKSPACE_SETUP"
+    set -u
+    timeout 20s ros2 --use-python-default-buffering topic echo /motor/status >"$status_file"
+  ) &
+  status_pid=$!
+
+  # Wait until the echo subscriber is visible on the graph before sending.
+  local subscriptions
+  subscriptions=0
+  for _attempt in {1..12}; do
+    subscriptions="$(topic_subscription_count /motor/cmd || echo 0)"
+    if [[ "${subscriptions:-0}" =~ ^[0-9]+$ ]] && (( subscriptions >= 2 )); then
+      break
+    fi
+    sleep 1
+  done
 
   for _attempt in 1 2 3; do
     cmd_response="$(
@@ -189,12 +219,24 @@ check_motor_cmd_loop() {
         "$BACKEND_BASE_URL/api/robot/motor/cmd"
     )"
 
-    for _poll in {1..5}; do
+    for _poll in {1..10}; do
       if grep -q '"target_rpm":123.0' "$echo_file"; then
         kill "$echo_pid" >/dev/null 2>&1 || true
         wait "$echo_pid" >/dev/null 2>&1 || true
+        kill "$status_pid" >/dev/null 2>&1 || true
+        wait "$status_pid" >/dev/null 2>&1 || true
         log "dashboard -> MQTT -> ROS /motor/cmd OK"
-        rm -f "$echo_file"
+        rm -f "$echo_file" "$status_file"
+        return 0
+      fi
+
+      if grep -Eq '"target_rpm":123(\.0+)?' "$status_file"; then
+        kill "$echo_pid" >/dev/null 2>&1 || true
+        wait "$echo_pid" >/dev/null 2>&1 || true
+        kill "$status_pid" >/dev/null 2>&1 || true
+        wait "$status_pid" >/dev/null 2>&1 || true
+        log "dashboard -> MQTT -> ROS -> ESP32 motor status OK"
+        rm -f "$echo_file" "$status_file"
         return 0
       fi
       sleep 1
@@ -202,7 +244,8 @@ check_motor_cmd_loop() {
   done
 
   wait "$echo_pid" || true
-  rm -f "$echo_file"
+  wait "$status_pid" || true
+  rm -f "$echo_file" "$status_file"
   fail "未在 ROS 2 /motor/cmd 上观察到 backend 下发的命令。响应：$cmd_response"
 }
 

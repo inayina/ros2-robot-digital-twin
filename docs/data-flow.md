@@ -2,6 +2,13 @@
 
 ## End-to-End Overview
 
+本仓库已经做过一轮 dashboard 联调。当前对外说明不再按“监控优先”组织，而是按访问形态收口为 `2` 条交互链路和 `1` 条只读链路：
+
+- 交互链路 1：WMS 链路，来自 `/home/ina/ros2_ws/src/amr_warehouse_sim`；该仓库里的 Mock WMS SQLite / CLI / HTTP API / executor 之前已经做过调试和验证
+- 交互链路 2：`POST /api/robot/motor/cmd -> MQTT robot/motor/cmd -> ROS 2 /motor/cmd -> ESP32`
+- 只读链路：`robot/imu` 与 `robot/motor/status`
+- 额外保留：`/cmd_vel -> ESP32 -> STM32 -> TB6612 A 路` legacy 本地控制链路
+
 ```text
 启动协商
 ESP32 上电初始化
@@ -88,6 +95,13 @@ ROS 2 /motor/status
   -> dashboard frontend / robot-ops-dashboard
 ```
 
+如果只看 dashboard-facing contract，可以把上面的链路压缩成：
+
+- 交互：`amr_warehouse_sim` Mock WMS
+- 交互：`/motor/cmd`
+- 只读：`robot/imu` + `robot/motor/status`
+- 额外保留：`/cmd_vel` legacy 本地控制链路
+
 ## Roles
 
 - STM32：负责采样、姿态解算、状态判别、本地 LED 报警；既有 TB6612 A 路执行控制保留为 legacy open-loop 验证链路。
@@ -136,6 +150,6 @@ ROS 2 /motor/status
 - `IMUQ` 输出被分频到约 `50 Hz`，以减轻 UART 和桥接端压力；ESP32 侧也保留独立 ROS 发布限频，不要求把所有数据 `100 Hz` 发布到 ROS 2。
 - `State:<n>` 由 `10` 个样本组成一个窗口，因此当前状态输出约为 `10 Hz`。
 - Gazebo 默认消费 `/imu/filtered`，并通过 `lock_yaw:=true` 固定初始 yaw，减少 6 轴方案的漂移观感。
-- ESP32 的 `/motor/target_rpm` 与 `/motor/cmd -> /motor/status / /motor/actual_rpm / /motor/state` 当前先用 mock 链路验证 dashboard 控制闭环；真实 TB6612 B 路输出保持安全默认关闭，bench 确认后再打开 `kEnableMotorHardwareOutputs`。
+- ESP32 的 `/motor/target_rpm` 与 `/motor/cmd -> /motor/status / /motor/actual_rpm / /motor/state` 当前仍主要用 mock telemetry 验证 dashboard 控制闭环；同时 `kEnableMotorHardwareOutputs` 已打开，TB6612 B 路会在 `enabled / control_enabled / timeout / estop / fault` 门限满足时实际输出，占空比仍受 `max_pwm` 约束。
 - ESP32 本地 motor-control skeleton 可以保持 `10 ms / 100 Hz` 控制周期；ROS / MQTT / dashboard 状态回传必须降频。真实 N20 接入前先执行 `docs/pre_n20_regression_check.md`。
 - dashboard frontend 不直接连接 ROS 2、ESP32 或 micro-ROS runtime；当前推荐通过 `robot/imu` 与 `robot/motor/status` 这两个 MQTT topic 由 dashboard backend 统一接入。

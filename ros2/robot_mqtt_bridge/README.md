@@ -2,6 +2,11 @@
 
 `robot_mqtt_bridge` 是当前主链路里的 ROS 2 <-> MQTT bridge 包。
 
+在当前联调口径里，它主要参与两类对外接口：
+
+- 交互：`robot/motor/cmd -> /motor/cmd`
+- 只读：`/motor/status -> robot/motor/status`
+
 当前收口两条电机链路：
 
 - 上行状态：

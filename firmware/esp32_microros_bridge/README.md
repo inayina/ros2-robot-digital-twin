@@ -44,7 +44,7 @@
 
 电机闭环控制主线迁移到 ESP32：当前 TB6612 A 通道保留给 130 普通电机做驱动通道辅助验证，TB6612 B 通道承担单 6V N20 编码器减速电机闭环主线。单 N20 跑通后，再购买第二个同规格 N20，把 A 通道从 130 切换为 N20 扩展双轮差速。STM32 既有 open-loop motor control 仅保留为 legacy experiment / early validation，不再继续扩展为编码器读取、PID 调速、双轮差速或 `ros2_control` 主线。详细架构见 [docs/design.md](docs/design.md) 和 [docs/motor_control_design.md](docs/motor_control_design.md)。
 
-当前代码已经实现双核任务框架、`/motor/target_rpm` 与 `/motor/cmd` 命令入口、mock `actual_rpm` 响应、`/motor/status` 与 `/motor/state` 发布，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级安全约束。TB6612 B 路真实输出代码已接到 `motorControllerApplyHardwareOutputs()`，但默认 `kEnableMotorHardwareOutputs = false`，bench 确认前不会自动驱动实物。
+当前代码已经实现双核任务框架、`/motor/target_rpm` 与 `/motor/cmd` 命令入口、mock `actual_rpm` 响应、`/motor/status` 与 `/motor/state` 发布，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级安全约束。TB6612 B 路真实输出代码已接到 `motorControllerApplyHardwareOutputs()`，并且当前 `kEnableMotorHardwareOutputs = true`；实际输出仍受 `enabled`、`control_enabled`、`timeout`、`estop`、`fault` 和 `max_pwm` 这些保护约束。
 
 130 普通电机 A 通道 bench test 已保留为可开关调试项：
 
@@ -264,6 +264,8 @@ CMDVEL,0.000,1.000
   类型：`geometry_msgs/msg/Twist`
 - `/motor/target_rpm`
   类型：`std_msgs/msg/Float32`
+- `/motor/cmd`
+  类型：`std_msgs/msg/String`
 
 收到 `/cmd_vel` 后，ESP32 会把：
 
@@ -273,6 +275,8 @@ CMDVEL,0.000,1.000
 编码成 `CMDVEL` 文本帧，经 `UART1` 发给 STM32。
 
 收到 `/motor/target_rpm` 后，ESP32 会把目标转速写入 Core 0 / Core 1 共享命令。当前 `motor_control_task` 先用 mock response 模拟 `actual_rpm` 追踪 `target_rpm`，并通过 `/motor/status`、`/motor/actual_rpm` 和 `/motor/state` 回传状态；N20 到货并实测后，再把 mock response 替换为真实 encoder/PID 反馈。
+
+收到 `/motor/cmd` 后，ESP32 会解析 JSON 里的 `target_rpm`、`enabled`、`closed_loop`、`max_pwm`、`timeout_ms` 和 `stop`，再写入 Core 0 / Core 1 共享命令，供 `motor_control_task` 执行安全约束后的控制输出。
 
 ## 连接恢复
 
@@ -364,6 +368,26 @@ source /opt/ros/jazzy/setup.bash
 ros2 topic list
 ros2 topic echo /imu/data
 ros2 topic echo /robot/state
+```
+
+如果已经烧录并复位板子，推荐直接跑仓库里的整链检查脚本：
+
+```bash
+cd /home/ina/Documents/PlatformIO/Projects/robot-state-monitor-v1
+./scripts/check_real_hw_chain.sh
+```
+
+它会检查：
+
+- `/imu/data`、`/imu/filtered`、`/robot/state`
+- `/motor/status`、`/motor/actual_rpm`、`/motor/state`
+- `/cmd_vel`、`/motor/target_rpm`、`/motor/cmd` 的下行订阅是否在线
+
+如果还要把 dashboard backend / MQTT 链路一起验掉，可以追加：
+
+```bash
+cd /home/ina/Documents/PlatformIO/Projects/robot-state-monitor-v1
+./scripts/check_real_hw_chain.sh --dashboard
 ```
 
 ## 用 rqt 控制

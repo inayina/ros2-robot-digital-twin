@@ -72,7 +72,7 @@ constexpr float kMockMotorMaxAbsRpm = 300.0f;
 constexpr float kMotorControlDefaultMaxPwm = 0.25f;
 constexpr float kMotorControlCommandMaxPwm = 0.50f;
 
-constexpr bool kEnableMotorHardwareOutputs = false;
+constexpr bool kEnableMotorHardwareOutputs = true;
 constexpr bool kEnableTb6612ChannelABenchTest = false;
 constexpr bool kEnableTb6612ChannelBBenchTest = false;
 constexpr bool kEnableN20ClosedLoopBench = false;

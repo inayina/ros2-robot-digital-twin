@@ -5,8 +5,15 @@
 这个整合仓库已经同步到当前联调版本，当前系统分成三层，并额外提供面向 dashboard backend 的 MQTT 状态桥：
 
 - STM32F411：100 Hz 采样 MPU6050，完成 6 轴姿态解算、窗口 RMS 状态判别、LED 报警；既有 `CMDVEL -> TB6612 A 路` 只保留为 legacy open-loop 验证链路
-- ESP32-S3：通过 UART 解析 STM32 文本帧，通过 WiFi UDP 建立 micro-ROS 链路，发布 `/imu/data`、`/imu/filtered`、`/robot/state`，订阅 `/cmd_vel` 和 `/motor/target_rpm`，并已落地双核 motor-control skeleton
+- ESP32-S3：通过 UART 解析 STM32 文本帧，通过 WiFi UDP 建立 micro-ROS 链路，发布 `/imu/data`、`/imu/filtered`、`/robot/state`、`/motor/status`，订阅 `/cmd_vel`、`/motor/target_rpm` 和 `/motor/cmd`，并已落地双核 motor-control skeleton
 - ROS 2 Jazzy：提供 Gazebo Harmonic 数字孪生、IMU CSV/状态 JSONL 记录、raw/filtered 实时曲线可视化，以及 `robot_mqtt_bridge` 电机状态 MQTT 输出
+
+这个仓库已经和 `robot-ops-dashboard` 做过一轮联调。当前对外口径不再写“监控优先”，而是按访问形态收口为 `2` 条交互链路和 `1` 条只读链路：
+
+- 交互链路 1：WMS 链路，来自 `/home/ina/ros2_ws/src/amr_warehouse_sim` 的 Mock WMS 任务流；这条链路之前已经做过调试和验证
+- 交互链路 2：`POST /api/robot/motor/cmd -> MQTT robot/motor/cmd -> ROS 2 /motor/cmd -> ESP32 motor_control_task`
+- 只读链路：`robot/imu` 与 `robot/motor/status` 由 backend / frontend 消费，不从 dashboard 侧反写到底层设备
+- 补充：`/cmd_vel -> ESP32 -> STM32 -> TB6612 A 路` 仍保留为 legacy 本地控制 / 验证链路，但不再作为这里的“交互链路 1”
 
 ## 仓库结构
 
@@ -98,6 +105,13 @@ ROS 2 /motor/status
   -> robot-ops-dashboard frontend
 ```
 
+按 dashboard 对接口径看，上面这些链路可以归并为：
+
+- 交互链路 1：`amr_warehouse_sim` Mock WMS
+- 交互链路 2：`/motor/cmd`
+- 只读链路：`robot/imu` + `robot/motor/status`
+- 额外保留：`/cmd_vel` legacy 本地控制链路
+
 ## 当前接口
 
 - `STM32 -> ESP32`：`IMUQ,...`、`IMU,...`（兼容旧格式）、`State:<n>`、`DBG:...`
@@ -117,6 +131,11 @@ ROS 2 /motor/status
   - `robot/motor/status`：由 `ros2/robot_mqtt_bridge` 从 `/motor/status` 转发
 - dashboard backend 输出：
   - `robot/motor/cmd`：由 `robot-ops-dashboard` backend 发布，经过 `ros2/robot_mqtt_bridge` 转成 `/motor/cmd`
+- dashboard 对外分工：
+  - 交互：`/home/ina/ros2_ws/src/amr_warehouse_sim` Mock WMS 任务态链路
+  - 交互：`POST /api/robot/motor/cmd` / `robot/motor/cmd` 主电机命令链路
+  - 只读：`robot/imu`、`robot/motor/status`
+  - 额外保留：`/cmd_vel` legacy 控制链路
 
 ## 快速开始
 
@@ -189,10 +208,18 @@ ros2 topic echo --once /imu/data
 ros2 topic echo --once /imu/filtered
 ros2 topic echo --once /robot/state
 ros2 topic info -v /cmd_vel
-ros2 topic echo --once /motor/cmd
+ros2 topic info -v /motor/target_rpm
+ros2 topic info -v /motor/cmd
 ros2 topic echo --once /motor/status
 ros2 topic echo --once /motor/actual_rpm
 ros2 topic echo --once /motor/state
+```
+
+如果已经完成烧录并复位板子，推荐直接运行仓库脚本做整链检查：
+
+```bash
+./scripts/check_real_hw_chain.sh
+./scripts/check_real_hw_chain.sh --dashboard
 ```
 
 ### 6. 记录数据或启动 Gazebo
@@ -241,7 +268,7 @@ dashboard IMU MQTT bridge 目前位于外部仓库 `robot-ops-dashboard/scripts/
 - `/imu/filtered` 只对线加速度和角速度做一阶低通，保留 STM32 原始姿态四元数
 - ESP32 默认不把训练 CSV 当作正式 IMU 输入
 - 当前默认不在运行态周期性 `ping` Agent
-- ESP32 本地电机控制当前已补齐 `/motor/cmd`、`/motor/status`、`robot/motor/cmd -> /motor/cmd` 主链路，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级约束；默认仍以 mock `actual_rpm` 验证闭环，TB6612 B 路真实输出保持 `kEnableMotorHardwareOutputs = false`，需要 bench 确认后再打开
+- ESP32 本地电机控制当前已补齐 `/motor/cmd`、`/motor/status`、`robot/motor/cmd -> /motor/cmd` 主链路，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级约束；`/motor/status` 等状态仍以 mock telemetry 为主，但 `kEnableMotorHardwareOutputs` 当前已打开，TB6612 B 路会在 `enabled / control_enabled / timeout / estop / fault` 这些安全门满足时输出，占空比仍受 `max_pwm` 约束
 - 接真实 N20 前必须先通过 `docs/pre_n20_regression_check.md`：当前只验证双核任务隔离、发布限频、mock motor telemetry 和 `motor_control_task` jitter
 - STM32 可以继续 `100 Hz` 采样，但 ESP32 不需要把所有数据都 `100 Hz` 发布到 ROS 2；当前默认 `/imu/data` 为 `50 Hz`，`/imu/filtered` 为 `25 Hz`
 - ESP32 本地电机控制可以保持 `10 ms / 100 Hz`，但 ROS / MQTT / dashboard 状态回传必须降频；当前默认 `/motor/actual_rpm` 为 `20 Hz`，`/motor/status` 与 `/motor/state` JSON 为 `5 Hz`
