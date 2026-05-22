@@ -17,6 +17,8 @@ MotorControlStateSnapshot motorControllerUpdateMock(
     uint32_t now_ms,
     uint32_t loop_count);
 
+void motorControllerSetHardwareOutputsEnabled(bool enabled);
+bool motorControllerHardwareOutputsEnabled();
 void motorControllerApplyHardwareOutputs(const MotorControlStateSnapshot& state);
 float motorControllerReadEncoderRpm();
 

@@ -44,6 +44,7 @@ struct MotorControlStateSnapshot {
     bool saturated;
     bool estop_active;
     bool fault_active;
+    bool hardware_outputs_enabled;
 };
 
 void motorSharedInit();

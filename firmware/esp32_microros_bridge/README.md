@@ -44,7 +44,16 @@
 
 电机闭环控制主线迁移到 ESP32：当前 TB6612 A 通道保留给 130 普通电机做驱动通道辅助验证，TB6612 B 通道承担单 6V N20 编码器减速电机闭环主线。单 N20 跑通后，再购买第二个同规格 N20，把 A 通道从 130 切换为 N20 扩展双轮差速。STM32 既有 open-loop motor control 仅保留为 legacy experiment / early validation，不再继续扩展为编码器读取、PID 调速、双轮差速或 `ros2_control` 主线。详细架构见 [docs/design.md](docs/design.md) 和 [docs/motor_control_design.md](docs/motor_control_design.md)。
 
-当前代码已经实现双核任务框架、`/motor/target_rpm` 与 `/motor/cmd` 命令入口、mock `actual_rpm` 响应、`/motor/status` 与 `/motor/state` 发布，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级安全约束。TB6612 B 路真实输出代码已接到 `motorControllerApplyHardwareOutputs()`，并且当前 `kEnableMotorHardwareOutputs = true`；实际输出仍受 `enabled`、`control_enabled`、`timeout`、`estop`、`fault` 和 `max_pwm` 这些保护约束。
+当前代码已经实现双核任务框架、`/motor/target_rpm` 与 `/motor/cmd` 命令入口、`/motor/status` 与 `/motor/state` 发布，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级安全约束。当前 `/motor/cmd` 常规路径已经接入单 N20 bench 接线下的真实编码器滤波 `actual_rpm` 和本地 PI 输出，但参数仍以台架保守联调为主，不代表完整底盘调速完成。普通启动默认仍保持 `kEnableMotorHardwareOutputs = false`、`kEnableN20ClosedLoopBench = false`，上电后不会自动输出真实 TB6612 PWM。
+
+当前固件同时支持 bench 运行时解锁，不需要为了单次台架联调反复改这两个编译期开关：
+
+- 收到 `/motor/cmd` 且 `enabled=true`、`stop=false` 时，会在运行时打开真实硬件输出路径
+- 收到 `stop=true` 或 `enabled=false` 时，会在运行时关闭真实硬件输出路径
+- `/motor/status` / `motor_state` 会额外带出 `hardware_outputs_enabled`
+- 如需显式覆盖，也支持在 `/motor/cmd` JSON 中携带 `hardware_enable`
+
+这条运行时解锁只面向已确认安全的固定 bench 摆位，不改变普通启动默认值。
 
 130 普通电机 A 通道 bench test 已保留为可开关调试项：
 
@@ -77,7 +86,7 @@
 - `ros/uros_core.[h/cpp]`
   micro-ROS 基础上下文，负责 `support / node / allocator`
 - `ros/uros_pub.[h/cpp]`
-  上行 publisher，负责 IMU / robot state 和 mock motor state 发布
+  上行 publisher，负责 IMU / robot state 和 motor state 发布
 - `ros/uros_sub.[h/cpp]`
   下行 subscriber，负责 `/cmd_vel`、`/motor/target_rpm`、`/motor/cmd` 和 executor
 - `bridge/stm32_serial_parser.[h/cpp]`
@@ -87,7 +96,7 @@
 - `motor/motor_control_shared.[h/cpp]`
   Core 0 / Core 1 之间的共享命令与状态快照
 - `motor/motor_controller.[h/cpp]`
-  Core 1 电机控制骨架，当前使用 mock motor response，预留真实 PWM/DIR、encoder A/B、PID 接口
+  Core 1 电机硬件输出与运行时 arm/disarm 控制
 - `motor/motor_response_model.[h/cpp]`
   无硬件 mock motor response，用于在 N20 未到货时验证 `target_rpm -> actual_rpm` 数据流
 - `motor/encoder_rpm_estimator.[h/cpp]`
@@ -159,41 +168,51 @@ ESP32 侧的配置分两层：
 - `kEnableN20ClosedLoopBench`
 - `kN20ClosedLoopBenchControlPeriodMs`
 - `kN20ClosedLoopBenchPrintIntervalMs`
+- `kN20ClosedLoopBenchMaxDurationMs`
 - `kN20ClosedLoopBenchMaxPwm`
+- `kN20ClosedLoopBenchMaxTargetRpm`
+- `kN20ClosedLoopBenchMinEffectivePwm`
+- `kN20ClosedLoopBenchEncoderPulsesPerRev / GearRatio / EdgesPerPulse`
+- `kN20ClosedLoopBenchWheelDiameterM`
+- `kN20ClosedLoopBenchInvertEncoderDirection`
 - `kN20ClosedLoopBenchKp / Ki / Kd`
 - `kN20ClosedLoopBenchIntegralMin / Max`
 - `kN20ClosedLoopBenchProfileStep*StartMs`
-- `kN20ClosedLoopBenchProfileStep*TargetTicksPerSec`
+- `kN20ClosedLoopBenchProfileStep*TargetRpm`
 
 默认阶跃 profile：
 
-- `0-2s`：`0 ticks/s`
-- `2-6s`：`500 ticks/s`
-- `6-10s`：`800 ticks/s`
-- `10-14s`：`1000 ticks/s`
-- `14-18s`：`500 ticks/s`
-- `18s` 后：`0 ticks/s`
+- `0-1s`：`0 rpm`
+- `1-4s`：`40 rpm`
+- `4-7s`：`60 rpm`
+- `7-10s`：`80 rpm`
+- `10-13s`：`50 rpm`
+- `13-15s`：`0 rpm`
+- `15s` 后自动 stop，硬上限 `20s`
 
 串口日志输出为 CSV：
 
 ```text
-timestamp_ms,target_ticks_per_sec,measured_ticks_per_sec,pwm,error,encoder_count,invalid_transitions
-2059,500.000,160.000,0.063,340.000,-8,0
-6159,800.000,400.000,0.092,400.000,-1152,0
-10159,1000.000,560.000,0.099,440.000,-2990,0
-14059,500.000,180.000,0.078,320.000,-5204,0
+timestamp_ms,target_rpm,actual_rpm,error_rpm,pwm,direction,encoder_delta,status,raw_rpm,filtered_rpm,integral,output_saturated,bench_phase,invalid_transitions
+1050,40.000,5.091,34.909,0.120,1,16,run,14.545,5.091,3.745,0,1050,0
 ```
 
 运行方法：
 
 1. 在 [app_config.h](src/config/app_config.h) 中把 `kEnableN20ClosedLoopBench` 临时改为 `true`
-2. 运行 `~/.platformio/penv/bin/pio run --target upload --upload-port /dev/ttyACM0`
-3. 打开 `pio device monitor -b 921600 --port /dev/ttyACM0`
-4. 复制 CSV 日志到表格或脚本做阶跃响应曲线
+2. 运行 `python3 -m platformio run`
+3. 运行 `python3 -m platformio run --target upload --upload-port /dev/ttyACM0`
+4. 打开 `python3 -m platformio device monitor -b 921600 --port /dev/ttyACM0`
+5. 从 CSV header 开始复制日志到 `.csv` 文件或表格做阶跃响应曲线
 5. 测试结束后把 `kEnableN20ClosedLoopBench` 改回 `false` 并重新烧录安全版
 
 说明：
 
+- 当前硬件链路是 `ESP32-S3 -> TB6612FNG -> single N20 motor with encoder`
+- 当前控制边界是 single motor `target_rpm / actual_rpm` 闭环，不是完整双轮底盘，不是 robot linear velocity，也不是 `ros2_control`
+- 当前实测在 `max_pwm = 0.25` 下更适合 `40/60/80/50 rpm` 保守 profile；`120/180 rpm` 会长期大误差或接近饱和，不作为默认录屏 profile
+- `direction = 1` 表示当前软件定义 forward，`encoder_delta` 和 `actual_rpm` 应与 forward 保持同号；如果反了，优先改 `kN20ClosedLoopBenchInvertEncoderDirection`
+- `wheel_diameter_m` 只作为后续轮速显示/换算准备，当前 PID 仍以电机输出轴 rpm 为控制量
 - bench 模式会压掉本地 IMU / runtime 高频调试，尽量让串口以 CSV 为主
 - 如果没启动 micro-ROS Agent，启动阶段仍可能看到少量 WiFi / micro-ROS 重连提示，这些不影响 CSV 行本身
 
@@ -254,7 +273,7 @@ CMDVEL,0.000,1.000
 - `/motor/status`
   当前主电机状态字符串，包含 target / measured / pwm / enabled / fault 等字段
 - `/motor/actual_rpm`
-  当前 mock motor response 得到的实际转速估计
+  当前单 N20 bench 接线下的编码器滤波实际转速
 - `/motor/state`
   兼容旧调试链路的电机状态字符串，字段与 `/motor/status` 保持一致
 
@@ -274,9 +293,9 @@ CMDVEL,0.000,1.000
 
 编码成 `CMDVEL` 文本帧，经 `UART1` 发给 STM32。
 
-收到 `/motor/target_rpm` 后，ESP32 会把目标转速写入 Core 0 / Core 1 共享命令。当前 `motor_control_task` 先用 mock response 模拟 `actual_rpm` 追踪 `target_rpm`，并通过 `/motor/status`、`/motor/actual_rpm` 和 `/motor/state` 回传状态；N20 到货并实测后，再把 mock response 替换为真实 encoder/PID 反馈。
+收到 `/motor/target_rpm` 后，ESP32 会把目标转速写入 Core 0 / Core 1 共享命令。当前 `motor_control_task` 会在单 N20 bench 接线下使用真实 encoder A/B 计数、滤波后的 `actual_rpm` 和本地 PI 输出追踪 `target_rpm`，并通过 `/motor/status`、`/motor/actual_rpm` 和 `/motor/state` 回传状态。
 
-收到 `/motor/cmd` 后，ESP32 会解析 JSON 里的 `target_rpm`、`enabled`、`closed_loop`、`max_pwm`、`timeout_ms` 和 `stop`，再写入 Core 0 / Core 1 共享命令，供 `motor_control_task` 执行安全约束后的控制输出。
+收到 `/motor/cmd` 后，ESP32 会解析 JSON 里的 `target_rpm`、`enabled`、`closed_loop`、`max_pwm`、`timeout_ms` 和 `stop`，再写入 Core 0 / Core 1 共享命令，供 `motor_control_task` 在本地 encoder/PID 反馈下执行安全约束后的控制输出。当前 `20 rpm` 量级已能接近目标；`40/60/80 rpm` 仍是保守台架 tune，可能存在明显稳态误差。
 
 ## 连接恢复
 

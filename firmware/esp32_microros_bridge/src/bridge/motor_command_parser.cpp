@@ -138,6 +138,7 @@ bool motorCommandParseJson(const char* payload, MotorCommandMessage& message) {
     const char* enabled_keys[] = {"enabled", "enable", "control_enabled"};
     const char* closed_loop_keys[] = {"closed_loop"};
     const char* stop_keys[] = {"stop", "estop", "estop_active"};
+    const char* hardware_enable_keys[] = {"hardware_enable", "hardware_outputs_enabled", "arm"};
 
     message.has_target_rpm = parseNumberField(
         cursor, target_rpm_keys, sizeof(target_rpm_keys) / sizeof(target_rpm_keys[0]), message.target_rpm);
@@ -154,11 +155,17 @@ bool motorCommandParseJson(const char* payload, MotorCommandMessage& message) {
         message.closed_loop);
     message.has_stop = parseBoolField(
         cursor, stop_keys, sizeof(stop_keys) / sizeof(stop_keys[0]), message.stop);
+    message.has_hardware_enable = parseBoolField(
+        cursor,
+        hardware_enable_keys,
+        sizeof(hardware_enable_keys) / sizeof(hardware_enable_keys[0]),
+        message.hardware_enable);
 
     return message.has_target_rpm ||
         message.has_max_pwm ||
         message.has_timeout_ms ||
         message.has_enabled ||
         message.has_closed_loop ||
-        message.has_stop;
+        message.has_stop ||
+        message.has_hardware_enable;
 }

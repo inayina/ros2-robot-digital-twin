@@ -10,7 +10,7 @@
 - ESP32 读取 N20 编码器 A/B
 - ESP32 计算 rpm
 - ESP32 本地执行 PID 速度闭环
-- ROS 2 / micro-ROS 下发 `target_rpm`
+- 当前 bench 使用本地 step profile 下发 `target_rpm`
 - ESP32 回传 `actual_rpm` / `motor_state`
 
 当前不做完整底盘，不追求地面移动，不声明已经完成双轮差速、`/odom` 或导航级实车运动控制。
@@ -27,9 +27,9 @@
 
 STM32F411 保留 MPU6050 采样、姿态解算、IMU / robot state 输出和原有数字孪生链路。它不再作为 N20 编码器电机闭环主控制器。
 
-ESP32-S3 负责 N20 PWM/DIR、编码器读取、rpm 计算、PID 速度闭环、ROS 2 / micro-ROS 目标速度接收和状态回传。后续双轮差速、`/cmd_vel` 解算和 `ros2_control` 接入都沿 ESP32 主线扩展。
+ESP32-S3 负责 N20 PWM/DIR、编码器读取、rpm 计算和 PI 速度闭环。当前收口目标是 single N20 motor bench closed-loop validation，不扩展 dashboard、AMR、双轮差速、`/cmd_vel` 解算或 `ros2_control`。
 
-ROS 2 PC 发布目标速度、接收状态、做可视化验证，并在后续作为 `ros2_control hardware_interface` 的上位集成层。
+ROS 2 PC 在当前 bench 中不是实时闭环的一部分；本轮优先用 ESP32 串口 CSV 做硬件稳定性和调参验证。
 
 ## 3. Current Hardware Stage
 
@@ -81,20 +81,18 @@ STM32 既有 open-loop motor control 不删除。
 
 ```text
 ROS 2 / micro-ROS target_rpm
-  -> ESP32 ros_comm_task
-  -> target_rpm shared state / queue
+ESP32 local step profile target_rpm
   -> ESP32 motor_control_task
-  -> local PID
+  -> local PI/PID
   -> PWM/DIR
   -> TB6612 motor driver
   -> 6V N20 encoder gear motor
   -> encoder A/B
   -> ESP32 rpm calculation
-  -> motor_state shared state / queue
-  -> ROS 2 / optional MQTT dashboard
+  -> CSV log over USB serial
 ```
 
-第一版使用 `target_rpm`，避免过早引入底盘运动学。单 N20 闭环稳定后，再扩展到 `/cmd_vel -> left/right rpm`。
+当前 bench 使用 `target_rpm`，避免过早引入底盘运动学。此阶段不把 single motor bench 写成完整底盘控制。
 
 ### 5.1 ESP32 to TB6612 Wiring Plan
 
@@ -251,18 +249,19 @@ N20 encoder power -> logic-side power after voltage-level confirmation
 - Core 0 `ros_comm_task` 已实现并固定到通信侧运行时
 - Core 1 `motor_control_task` 已实现并固定到电机控制侧运行时
 - `ros_comm_task` 和 `motor_control_task` 已通过 shared state 交换命令 / 状态快照
-- 当前 Core 1 使用 mock motor response 模拟 `actual_rpm` 追踪 `target_rpm`
+- 当前普通 `/motor/target_rpm` / `/motor/cmd` 运行路径已经接入单 N20 bench 接线下的真实 encoder A/B 计数、滤波 `actual_rpm` 和本地 PI 输出
 - encoder rpm estimator、speed PID、single motor control 纯逻辑模块已落地
 - TB6612 driver 文件已落地，提供 A/B 双通道 PWM/DIR/STBY 可配置接口
 - 已保留 130 普通电机 A 通道 bench test，用于验证 TB6612 `PWMA/AIN1/AIN2/STBY`，默认关闭
-- 已新增单 N20 编码器速度闭环 step-response bench，本地读取 `GPIO10/GPIO11`、驱动 TB6612 B 通道、输出 CSV 调参日志，默认关闭
-- 当前仍未接入真实 PWM、编码器和 PID 执行
+- 已新增 single N20 encoder motor closed-loop bench，本地读取 `GPIO10/GPIO11`、驱动 TB6612 B 通道、输出 CSV 调参日志，默认关闭
+- 当前真实 PWM / encoder / PI 已用于普通 `/motor/target_rpm` / `/motor/cmd` bench 联调路径；`kEnableN20ClosedLoopBench = true` 额外提供本地 step profile + CSV 调参模式
+- 普通启动 `kEnableMotorHardwareOutputs = false` 且 `kEnableN20ClosedLoopBench = false`，不会让 TB6612 输出 PWM
 
 ### 6.1 Core 1: Motor-Control Core
 
 Core 1 规划运行 `motor_control_task`，负责实时性更高的本地控制：
 
-- 当前 mock `actual_rpm` response
+- 当前 encoder A/B 计数、滤波 `actual_rpm` 和本地 PI 输出
 - encoder pulse counting / PCNT
 - rpm calculation
 - PID speed control
@@ -312,12 +311,12 @@ Core 0 规划运行 `ros_comm_task`，负责通信和低频状态输出：
 - Publish: `/motor/actual_rpm`
 - Publish: `/motor/state`
 
-当前 `/motor/actual_rpm` 和 `/motor/state` 使用 mock motor response 数据；N20 到货并实测后，再替换为真实编码器 rpm 和 PID 状态。
+当前 `/motor/actual_rpm` 和 `/motor/state` 在普通 `/motor/target_rpm` / `/motor/cmd` 运行中已经回传真实编码器滤波 rpm 与本地 PI 状态；single N20 bench 的 USB serial CSV 仍保留用于更细的本地调参与波形记录。
 
 第一版用简单标量消息完成闭环验证：
 
 - `/motor/target_rpm`：目标 rpm
-- `/motor/actual_rpm`：当前为 mock actual rpm，真实闭环阶段改为编码器实测 rpm
+- `/motor/actual_rpm`：当前单 N20 bench 接线下的编码器实测滤波 rpm
 
 `/motor/state` 当前先用 `std_msgs/msg/String` 的易调试 JSON 风格字符串表达，字段包括：
 
@@ -332,7 +331,7 @@ Core 0 规划运行 `ros_comm_task`，负责通信和低频状态输出：
 - `estop`
 - `fault`
 
-当前代码状态字段结构位于 [motor_control_shared.h](../src/motor/motor_control_shared.h)，mock 控制骨架位于 [motor_controller.h](../src/motor/motor_controller.h) / [motor_controller.cpp](../src/motor/motor_controller.cpp)。TB6612 驱动边界位于 [tb6612_driver.h](../src/motor/tb6612_driver.h) / [tb6612_driver.cpp](../src/motor/tb6612_driver.cpp)，当前只提供可配置接口，不写死真实 GPIO、PWM channel、频率或分辨率。真实硬件阶段再把预留的 PWM/DIR、encoder A/B、PID 接口落到具体实现里。
+当前代码状态字段结构位于 [motor_control_shared.h](../src/motor/motor_control_shared.h)，mock 控制骨架位于 [motor_controller.h](../src/motor/motor_controller.h) / [motor_controller.cpp](../src/motor/motor_controller.cpp)。TB6612 驱动边界位于 [tb6612_driver.h](../src/motor/tb6612_driver.h) / [tb6612_driver.cpp](../src/motor/tb6612_driver.cpp)。single N20 bench 的 GPIO、PWM、encoder 和 PI 参数集中在 [app_config.h](../src/config/app_config.h)。
 
 双轮差速阶段再扩展：
 
@@ -376,6 +375,9 @@ Web dashboard -> realtime motor control loop
 第一版单电机闭环也必须包含安全边界：
 
 - 上电默认 0 PWM
+- bench enable flag 默认 `false`
+- 只有显式打开 `kEnableN20ClosedLoopBench` 时才允许 single N20 bench 输出 PWM
+- TB6612 `STBY` 默认进入安全状态
 - `target_rpm` timeout 后停车
 - ESTOP 覆盖普通速度命令
 - ESTOP 释放后不自动恢复旧速度
@@ -393,8 +395,12 @@ Web dashboard -> realtime motor control loop
 - `target_rpm` 命令共享状态
 - Core 1 本地 command timeout 检查
 - timeout 后本地 control state 置为 disabled
-
-但真实 PWM 归零、方向切换保护和 ESTOP 输出仍要等硬件控制层接入后完成。
+- 普通运行真实 TB6612 输出默认关闭：`kEnableMotorHardwareOutputs = false`
+- single N20 bench 默认关闭：`kEnableN20ClosedLoopBench = false`
+- bench init / stop / target 0 均写 `PWM = 0` 并关闭 `STBY`
+- bench profile 完成、最大时长、控制周期异常、TB6612 写失败或编码器非法跳变超限都会自动 stop
+- bench PI 输出、目标 rpm 和积分项都有集中限幅，饱和同向误差时不继续积累积分
+- bench 方向切换前会先 coast `kN20ClosedLoopBenchDirectionChangeCoastMs`
 
 ## 10. Phased Roadmap
 
@@ -444,7 +450,23 @@ Web dashboard -> realtime motor control loop
 - 加入 PWM 限幅和 anti-windup
 - 发布闭环状态
 
-代码层面已经落地 [speed_pid.h](../src/motor/speed_pid.h) / [speed_pid.cpp](../src/motor/speed_pid.cpp)，以及 [single_motor_control.h](../src/motor/single_motor_control.h) / [single_motor_control.cpp](../src/motor/single_motor_control.cpp)。当前只作为可测试纯逻辑，不绑定真实 PID 参数、不启用真实 PWM 输出。
+代码层面已经落地 [speed_pid.h](../src/motor/speed_pid.h) / [speed_pid.cpp](../src/motor/speed_pid.cpp)，以及 [single_motor_control.h](../src/motor/single_motor_control.h) / [single_motor_control.cpp](../src/motor/single_motor_control.cpp)。当前普通 ROS / dashboard bench 运行路径已经在 [main.cpp](../src/main.cpp) 中接入真实 TB6612 B 通道、encoder A/B 计数和本地 PI；`kEnableN20ClosedLoopBench` 继续保留为本地 step profile + CSV 调参模式。
+
+当前 bench 参数集中在 [app_config.h](../src/config/app_config.h)：
+
+- `control_period_ms = 50`
+- `max_pwm = 0.25`
+- `min_effective_pwm = 0.12`
+- `max_target_rpm = 80`
+- `kp = 0.0018`
+- `ki = 0.0012`
+- `kd = 0.0`
+- `integral_limit = -160.0 .. 160.0`
+- step profile: `0 -> 40 -> 60 -> 80 -> 50 -> 0 rpm`
+- profile stop: `15s`
+- max duration: `20s`
+
+2026-05-21 实机 bench 结果：该保守 profile 能完整跑完并自动 stop，`output_saturated = 0`，但 `80 rpm` 段实际约 `66 rpm`，因此当前参数定位为安全稳定录屏用 bench，不是精确调速最终参数。
 
 ### Phase 4: ROS 2 / micro-ROS Command and Feedback
 
@@ -458,6 +480,8 @@ Web dashboard -> realtime motor control loop
 ### Phase 5: Buy Second Matching N20 and Extend Differential Drive
 
 目标：单 N20 稳定后扩展到双电机。
+
+当前不是本轮目标，不能在 single N20 bench 尚未稳定前提前实现。
 
 - 购买第二个同规格 N20
 - 把 TB6612 A 通道从 130 普通电机切换为第二个 N20
@@ -478,6 +502,8 @@ Web dashboard -> realtime motor control loop
 
 目标：规划 `ros2_control` 对齐。
 
+当前不是本轮目标，不应接入 `ros2_control` 或把 single motor bench 包装成完整底盘。
+
 - velocity command interface
 - velocity state interface
 - encoder-derived wheel state
@@ -489,6 +515,8 @@ Web dashboard -> realtime motor control loop
 ### Phase 8: AMR Simulation / Dashboard / Ops Integration
 
 目标：与既有 AMR 仿真、dashboard 和运维链路合流。
+
+当前不是本轮目标。Dashboard 后续若加入 speed slider，也只能作为 target wheel speed / target rpm 的上位输入，不应直接暴露 PWM。
 
 - 与 AMR 仿真中的控制抽象对齐
 - 将 `motor_state` 镜像到 dashboard
@@ -530,4 +558,4 @@ Web dashboard -> realtime motor control loop
 
 当前电机控制路线是：保留 STM32 既有 open-loop 电机验证代码作为 legacy experiment，把新的 N20 编码器电机闭环主线迁移到 ESP32。
 
-当前 TB6612 A 通道保留给 130 普通电机做辅助验证，TB6612 B 通道承担单 N20 桌面闭环主线：`target_rpm -> ESP32 local PID -> PWM/DIR -> TB6612 B -> N20`，再把 `actual_rpm` / `motor_state` 回传 ROS 2。单 N20 闭环稳定后，再购买第二个同规格 N20，把 A 通道从 130 切换为 N20，扩展双轮差速、`/cmd_vel` 和 `ros2_control diff_drive_controller`。
+当前 TB6612 A 通道保留给 130 普通电机做辅助验证，TB6612 B 通道承担 single N20 桌面闭环主线。当前已经同时存在两种本地控制视角：`ROS / dashboard target_rpm -> ESP32 local PI -> PWM/DIR -> TB6612 B -> N20 -> encoder -> actual_rpm -> /motor/status`，以及更偏调参的 `local step target_rpm -> ESP32 local PI -> PWM/DIR -> TB6612 B -> N20 -> encoder -> actual_rpm -> CSV`。当前不是完整双轮底盘，不是 robot linear velocity，也不是 `ros2_control`；单 N20 bench 人工实测稳定后，再讨论后续双电机和上位接口。

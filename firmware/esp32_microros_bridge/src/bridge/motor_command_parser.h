@@ -10,12 +10,14 @@ struct MotorCommandMessage {
     bool enabled;
     bool closed_loop;
     bool stop;
+    bool hardware_enable;
     bool has_target_rpm;
     bool has_max_pwm;
     bool has_timeout_ms;
     bool has_enabled;
     bool has_closed_loop;
     bool has_stop;
+    bool has_hardware_enable;
 };
 
 bool motorCommandParseJson(const char* payload, MotorCommandMessage& message);

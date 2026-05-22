@@ -395,6 +395,7 @@ void urosPubPublishMotorState(const MotorControlStateSnapshot& state) {
     const int estop = state.estop_active ? 1 : 0;
     const int fault = state.fault_active ? 1 : 0;
     const int closed_loop = state.closed_loop ? 1 : 0;
+    const int hardware_outputs_enabled = state.hardware_outputs_enabled ? 1 : 0;
     const char* status = fault ? "fault" : estop ? "stopped" : timeout ? "stale" : "ok";
 
     const int len = snprintf(
@@ -403,7 +404,7 @@ void urosPubPublishMotorState(const MotorControlStateSnapshot& state) {
         "{\"status\":\"%s\",\"target_rpm\":%.3f,\"actual_rpm\":%.3f,\"error_rpm\":%.3f,"
         "\"measured_rpm\":%.3f,\"pwm_duty\":%.3f,\"pwm\":%.3f,"
         "\"max_pwm\":%.3f,\"command_timeout_ms\":%lu,\"direction\":%d,"
-        "\"control_enabled\":%d,\"enabled\":%d,"
+        "\"control_enabled\":%d,\"enabled\":%d,\"hardware_outputs_enabled\":%d,"
         "\"closed_loop\":%d,\"saturated\":%d,\"timeout\":%d,"
         "\"stop\":%d,\"estop\":%d,\"fault\":%d,\"source\":\"%s\",\"loop\":%lu}",
         status,
@@ -418,6 +419,7 @@ void urosPubPublishMotorState(const MotorControlStateSnapshot& state) {
         (int)state.direction,
         enabled,
         enabled_request,
+        hardware_outputs_enabled,
         closed_loop,
         state.saturated ? 1 : 0,
         timeout,

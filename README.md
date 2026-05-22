@@ -268,8 +268,8 @@ dashboard IMU MQTT bridge 目前位于外部仓库 `robot-ops-dashboard/scripts/
 - `/imu/filtered` 只对线加速度和角速度做一阶低通，保留 STM32 原始姿态四元数
 - ESP32 默认不把训练 CSV 当作正式 IMU 输入
 - 当前默认不在运行态周期性 `ping` Agent
-- ESP32 本地电机控制当前已补齐 `/motor/cmd`、`/motor/status`、`robot/motor/cmd -> /motor/cmd` 主链路，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级约束；`/motor/status` 等状态仍以 mock telemetry 为主，但 `kEnableMotorHardwareOutputs` 当前已打开，TB6612 B 路会在 `enabled / control_enabled / timeout / estop / fault` 这些安全门满足时输出，占空比仍受 `max_pwm` 约束
-- 接真实 N20 前必须先通过 `docs/pre_n20_regression_check.md`：当前只验证双核任务隔离、发布限频、mock motor telemetry 和 `motor_control_task` jitter
+- ESP32 本地电机控制当前已补齐 `/motor/cmd`、`/motor/status`、`robot/motor/cmd -> /motor/cmd` 主链路，以及 `enable`、`max_pwm`、命令超时和 `stop` 优先级约束；`/motor/status` 等状态仍以 mock telemetry 为主，普通启动默认 `kEnableMotorHardwareOutputs = false`，不会输出真实 TB6612 PWM
+- 当前 single N20 closed-loop bench 只覆盖 `ESP32-S3 -> TB6612FNG -> single N20 motor with encoder`，通过 `kEnableN20ClosedLoopBench` 显式打开，本地 RPM step profile 自动 stop 并输出 CSV；它不是完整双轮底盘，不是 robot linear velocity，也不是 `ros2_control`
 - STM32 可以继续 `100 Hz` 采样，但 ESP32 不需要把所有数据都 `100 Hz` 发布到 ROS 2；当前默认 `/imu/data` 为 `50 Hz`，`/imu/filtered` 为 `25 Hz`
 - ESP32 本地电机控制可以保持 `10 ms / 100 Hz`，但 ROS / MQTT / dashboard 状态回传必须降频；当前默认 `/motor/actual_rpm` 为 `20 Hz`，`/motor/status` 与 `/motor/state` JSON 为 `5 Hz`
 - 真实 WiFi 凭据只放在 `firmware/esp32_microros_bridge/include/wifi_config.h`，上传仓库只保留 `wifi_config.example.h`

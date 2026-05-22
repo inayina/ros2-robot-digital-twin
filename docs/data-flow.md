@@ -150,6 +150,6 @@ ROS 2 /motor/status
 - `IMUQ` 输出被分频到约 `50 Hz`，以减轻 UART 和桥接端压力；ESP32 侧也保留独立 ROS 发布限频，不要求把所有数据 `100 Hz` 发布到 ROS 2。
 - `State:<n>` 由 `10` 个样本组成一个窗口，因此当前状态输出约为 `10 Hz`。
 - Gazebo 默认消费 `/imu/filtered`，并通过 `lock_yaw:=true` 固定初始 yaw，减少 6 轴方案的漂移观感。
-- ESP32 的 `/motor/target_rpm` 与 `/motor/cmd -> /motor/status / /motor/actual_rpm / /motor/state` 当前仍主要用 mock telemetry 验证 dashboard 控制闭环；同时 `kEnableMotorHardwareOutputs` 已打开，TB6612 B 路会在 `enabled / control_enabled / timeout / estop / fault` 门限满足时实际输出，占空比仍受 `max_pwm` 约束。
+- ESP32 的 `/motor/target_rpm` 与 `/motor/cmd -> /motor/status / /motor/actual_rpm / /motor/state` 当前仍主要用 mock telemetry 验证 dashboard 控制闭环；普通启动默认 `kEnableMotorHardwareOutputs = false`，不会输出真实 TB6612 PWM。真实 single N20 输出只在显式打开 `kEnableN20ClosedLoopBench` 时用于本地桌面闭环 bench。
 - ESP32 本地 motor-control skeleton 可以保持 `10 ms / 100 Hz` 控制周期；ROS / MQTT / dashboard 状态回传必须降频。真实 N20 接入前先执行 `docs/pre_n20_regression_check.md`。
 - dashboard frontend 不直接连接 ROS 2、ESP32 或 micro-ROS runtime；当前推荐通过 `robot/imu` 与 `robot/motor/status` 这两个 MQTT topic 由 dashboard backend 统一接入。

@@ -10,8 +10,10 @@
 
 #include "config/app_config.h"
 #include "bridge/motor_command_parser.h"
+#include "motor/encoder_rpm_estimator.h"
 #include "motor/motor_controller.h"
 #include "motor/motor_control_shared.h"
+#include "motor/single_motor_control.h"
 #include "motor/speed_pid.h"
 #include "motor/tb6612_driver.h"
 #include "bridge/stm32_serial_parser.h"
@@ -56,37 +58,57 @@ volatile uint8_t n20_encoder_bench_last_state = 0;
 struct N20ClosedLoopBenchConfig {
     uint32_t control_period_ms;
     uint32_t print_interval_ms;
-    bool invert_measured_ticks;
+    uint32_t max_duration_ms;
+    uint32_t direction_change_coast_ms;
+    bool invert_encoder_direction;
+    float max_target_rpm;
     float max_pwm;
+    float min_effective_pwm;
+    float deadband_rpm;
+    uint32_t max_invalid_encoder_transitions;
+    uint32_t profile_stop_ms;
+    EncoderRpmEstimatorConfig encoder;
     uint32_t profile_step1_start_ms;
     uint32_t profile_step2_start_ms;
     uint32_t profile_step3_start_ms;
     uint32_t profile_step4_start_ms;
     uint32_t profile_step5_start_ms;
-    float profile_step0_target_ticks_per_sec;
-    float profile_step1_target_ticks_per_sec;
-    float profile_step2_target_ticks_per_sec;
-    float profile_step3_target_ticks_per_sec;
-    float profile_step4_target_ticks_per_sec;
-    float profile_step5_target_ticks_per_sec;
+    float profile_step0_target_rpm;
+    float profile_step1_target_rpm;
+    float profile_step2_target_rpm;
+    float profile_step3_target_rpm;
+    float profile_step4_target_rpm;
+    float profile_step5_target_rpm;
     SpeedPidConfig pid;
 };
 
 struct N20ClosedLoopBenchRuntime {
     Tb6612Driver tb6612;
     SpeedPidRuntime pid;
-    int32_t last_encoder_count;
+    EncoderRpmEstimatorRuntime encoder;
     uint32_t last_control_ms;
     uint32_t last_print_ms;
     uint32_t start_ms;
-    float last_measured_ticks_per_sec;
-    float last_target_ticks_per_sec;
+    uint32_t direction_hold_until_ms;
+    int32_t last_encoder_delta;
+    float last_raw_rpm;
+    float last_filtered_rpm;
+    float last_target_rpm;
     float last_pwm;
     float last_error;
+    int8_t last_direction;
+    int8_t drive_direction;
+    bool last_output_saturated;
     bool csv_header_printed;
     bool completed;
     bool initialized;
     bool driver_ready;
+};
+
+struct DashboardMotorClosedLoopConfig {
+    EncoderRpmEstimatorConfig encoder;
+    SingleMotorControlConfig control;
+    bool invert_encoder_direction;
 };
 
 void handleParsedImuSample(const STM32ImuSample& sample);
@@ -250,25 +272,32 @@ N20ClosedLoopBenchConfig makeN20ClosedLoopBenchConfig() {
     N20ClosedLoopBenchConfig config = {};
     config.control_period_ms = app_config::kN20ClosedLoopBenchControlPeriodMs;
     config.print_interval_ms = app_config::kN20ClosedLoopBenchPrintIntervalMs;
-    config.invert_measured_ticks = app_config::kN20ClosedLoopBenchInvertMeasuredTicks;
+    config.max_duration_ms = app_config::kN20ClosedLoopBenchMaxDurationMs;
+    config.direction_change_coast_ms = app_config::kN20ClosedLoopBenchDirectionChangeCoastMs;
+    config.invert_encoder_direction = app_config::kN20ClosedLoopBenchInvertEncoderDirection;
+    config.max_target_rpm = app_config::kN20ClosedLoopBenchMaxTargetRpm;
     config.max_pwm = app_config::kN20ClosedLoopBenchMaxPwm;
+    config.min_effective_pwm = app_config::kN20ClosedLoopBenchMinEffectivePwm;
+    config.deadband_rpm = app_config::kN20ClosedLoopBenchDeadbandRpm;
+    config.max_invalid_encoder_transitions =
+        app_config::kN20ClosedLoopBenchMaxInvalidEncoderTransitions;
+    config.profile_stop_ms = app_config::kN20ClosedLoopBenchProfileStopMs;
+    config.encoder.counts_per_output_rev =
+        app_config::kN20ClosedLoopBenchEncoderPulsesPerRev *
+        app_config::kN20ClosedLoopBenchGearRatio *
+        app_config::kN20ClosedLoopBenchEdgesPerPulse;
+    config.encoder.filter_alpha = app_config::kN20ClosedLoopBenchEncoderFilterAlpha;
     config.profile_step1_start_ms = app_config::kN20ClosedLoopBenchProfileStep1StartMs;
     config.profile_step2_start_ms = app_config::kN20ClosedLoopBenchProfileStep2StartMs;
     config.profile_step3_start_ms = app_config::kN20ClosedLoopBenchProfileStep3StartMs;
     config.profile_step4_start_ms = app_config::kN20ClosedLoopBenchProfileStep4StartMs;
     config.profile_step5_start_ms = app_config::kN20ClosedLoopBenchProfileStep5StartMs;
-    config.profile_step0_target_ticks_per_sec =
-        app_config::kN20ClosedLoopBenchProfileStep0TargetTicksPerSec;
-    config.profile_step1_target_ticks_per_sec =
-        app_config::kN20ClosedLoopBenchProfileStep1TargetTicksPerSec;
-    config.profile_step2_target_ticks_per_sec =
-        app_config::kN20ClosedLoopBenchProfileStep2TargetTicksPerSec;
-    config.profile_step3_target_ticks_per_sec =
-        app_config::kN20ClosedLoopBenchProfileStep3TargetTicksPerSec;
-    config.profile_step4_target_ticks_per_sec =
-        app_config::kN20ClosedLoopBenchProfileStep4TargetTicksPerSec;
-    config.profile_step5_target_ticks_per_sec =
-        app_config::kN20ClosedLoopBenchProfileStep5TargetTicksPerSec;
+    config.profile_step0_target_rpm = app_config::kN20ClosedLoopBenchProfileStep0TargetRpm;
+    config.profile_step1_target_rpm = app_config::kN20ClosedLoopBenchProfileStep1TargetRpm;
+    config.profile_step2_target_rpm = app_config::kN20ClosedLoopBenchProfileStep2TargetRpm;
+    config.profile_step3_target_rpm = app_config::kN20ClosedLoopBenchProfileStep3TargetRpm;
+    config.profile_step4_target_rpm = app_config::kN20ClosedLoopBenchProfileStep4TargetRpm;
+    config.profile_step5_target_rpm = app_config::kN20ClosedLoopBenchProfileStep5TargetRpm;
     config.pid.kp = app_config::kN20ClosedLoopBenchKp;
     config.pid.ki = app_config::kN20ClosedLoopBenchKi;
     config.pid.kd = app_config::kN20ClosedLoopBenchKd;
@@ -279,24 +308,79 @@ N20ClosedLoopBenchConfig makeN20ClosedLoopBenchConfig() {
     return config;
 }
 
+DashboardMotorClosedLoopConfig makeDashboardMotorClosedLoopConfig() {
+    DashboardMotorClosedLoopConfig config = {};
+    config.encoder.counts_per_output_rev =
+        app_config::kN20ClosedLoopBenchEncoderPulsesPerRev *
+        app_config::kN20ClosedLoopBenchGearRatio *
+        app_config::kN20ClosedLoopBenchEdgesPerPulse;
+    config.encoder.filter_alpha = app_config::kN20ClosedLoopBenchEncoderFilterAlpha;
+    config.control.command_timeout_ms = app_config::kMotorControlCommandTimeoutMs;
+    config.control.min_command_timeout_ms = app_config::kMotorControlCommandTimeoutMinMs;
+    config.control.max_command_timeout_ms = app_config::kMotorControlCommandTimeoutMaxMs;
+    config.control.direction_change_coast_ms =
+        app_config::kN20ClosedLoopBenchDirectionChangeCoastMs;
+    config.control.max_abs_target_rpm = app_config::kN20ClosedLoopBenchMaxTargetRpm;
+    config.control.min_effective_pwm = app_config::kN20ClosedLoopBenchMinEffectivePwm;
+    config.control.deadband_rpm = app_config::kN20ClosedLoopBenchDeadbandRpm;
+    config.control.default_motor_cmd_max_pwm = app_config::kMotorControlDefaultMaxPwm;
+    config.control.max_command_max_pwm = app_config::kMotorControlCommandMaxPwm;
+    config.control.pid.kp = app_config::kN20ClosedLoopBenchKp;
+    config.control.pid.ki = app_config::kN20ClosedLoopBenchKi;
+    config.control.pid.kd = app_config::kN20ClosedLoopBenchKd;
+    config.control.pid.output_min = -app_config::kMotorControlCommandMaxPwm;
+    config.control.pid.output_max = app_config::kMotorControlCommandMaxPwm;
+    config.control.pid.integral_min = app_config::kN20ClosedLoopBenchIntegralMin;
+    config.control.pid.integral_max = app_config::kN20ClosedLoopBenchIntegralMax;
+    config.invert_encoder_direction = app_config::kN20ClosedLoopBenchInvertEncoderDirection;
+    return config;
+}
+
 float n20ClosedLoopBenchTargetForElapsedMs(const N20ClosedLoopBenchConfig& config,
                                            uint32_t elapsed_ms) {
     if (elapsed_ms < config.profile_step1_start_ms) {
-        return config.profile_step0_target_ticks_per_sec;
+        return config.profile_step0_target_rpm;
     }
     if (elapsed_ms < config.profile_step2_start_ms) {
-        return config.profile_step1_target_ticks_per_sec;
+        return config.profile_step1_target_rpm;
     }
     if (elapsed_ms < config.profile_step3_start_ms) {
-        return config.profile_step2_target_ticks_per_sec;
+        return config.profile_step2_target_rpm;
     }
     if (elapsed_ms < config.profile_step4_start_ms) {
-        return config.profile_step3_target_ticks_per_sec;
+        return config.profile_step3_target_rpm;
     }
     if (elapsed_ms < config.profile_step5_start_ms) {
-        return config.profile_step4_target_ticks_per_sec;
+        return config.profile_step4_target_rpm;
     }
-    return config.profile_step5_target_ticks_per_sec;
+    return config.profile_step5_target_rpm;
+}
+
+int8_t directionForTargetRpm(float rpm) {
+    if (rpm > 0.0f) {
+        return 1;
+    }
+    if (rpm < 0.0f) {
+        return -1;
+    }
+    return 0;
+}
+
+float clampTargetRpm(float target_rpm, float max_target_rpm) {
+    const float max_abs_target_rpm = (max_target_rpm < 0.0f) ? -max_target_rpm : max_target_rpm;
+    return clampFloat(target_rpm, -max_abs_target_rpm, max_abs_target_rpm);
+}
+
+bool n20ClosedLoopBenchConfigValid(const N20ClosedLoopBenchConfig& config) {
+    return config.control_period_ms > 0U &&
+        config.print_interval_ms > 0U &&
+        config.max_duration_ms > 0U &&
+        config.encoder.counts_per_output_rev > 0.0f &&
+        config.max_pwm >= 0.0f &&
+        config.max_pwm <= 1.0f &&
+        config.min_effective_pwm >= 0.0f &&
+        config.min_effective_pwm <= config.max_pwm &&
+        config.profile_stop_ms <= config.max_duration_ms;
 }
 
 void n20ClosedLoopBenchStop(N20ClosedLoopBenchRuntime& runtime, const char* reason) {
@@ -312,15 +396,20 @@ void n20ClosedLoopBenchStop(N20ClosedLoopBenchRuntime& runtime, const char* reas
 
     stopN20EncoderBench();
     speedPidReset(runtime.pid);
-    runtime.last_encoder_count = n20EncoderBenchCountSnapshot();
+    encoderRpmEstimatorInit(runtime.encoder);
     runtime.last_control_ms = 0U;
     runtime.last_print_ms = 0U;
     runtime.start_ms = 0U;
-    runtime.last_measured_ticks_per_sec = 0.0f;
-    runtime.last_target_ticks_per_sec = 0.0f;
+    runtime.direction_hold_until_ms = 0U;
+    runtime.last_encoder_delta = 0;
+    runtime.last_raw_rpm = 0.0f;
+    runtime.last_filtered_rpm = 0.0f;
+    runtime.last_target_rpm = 0.0f;
     runtime.last_pwm = 0.0f;
     runtime.last_error = 0.0f;
-    runtime.csv_header_printed = false;
+    runtime.last_direction = 0;
+    runtime.drive_direction = 0;
+    runtime.last_output_saturated = false;
     runtime.driver_ready = false;
     runtime.initialized = false;
 }
@@ -334,6 +423,7 @@ bool n20ClosedLoopBenchInit(N20ClosedLoopBenchRuntime& runtime,
 
     runtime = {};
     speedPidInit(runtime.pid);
+    encoderRpmEstimatorInit(runtime.encoder);
 
     if (!runtime.tb6612.begin(makeTb6612ChannelBBenchConfig())) {
         Serial.println("[N20_CLOSED_LOOP] TB6612 B init failed");
@@ -341,17 +431,26 @@ bool n20ClosedLoopBenchInit(N20ClosedLoopBenchRuntime& runtime,
     }
 
     runtime.tb6612.writeOutput(Tb6612Channel::kB, Tb6612OutputMode::kCoast, 0.0f);
-    runtime.tb6612.setStandby(true);
+    runtime.tb6612.setStandby(false);
 
     startN20EncoderBench();
-    runtime.last_encoder_count = n20EncoderBenchCountSnapshot();
+    encoderRpmEstimatorUpdate(runtime.encoder,
+                              config.encoder,
+                              n20EncoderBenchCountSnapshot(),
+                              config.control_period_ms);
     runtime.start_ms = now_ms;
     runtime.last_control_ms = now_ms;
     runtime.last_print_ms = 0U;
-    runtime.last_measured_ticks_per_sec = 0.0f;
-    runtime.last_target_ticks_per_sec = 0.0f;
+    runtime.direction_hold_until_ms = 0U;
+    runtime.last_encoder_delta = 0;
+    runtime.last_raw_rpm = 0.0f;
+    runtime.last_filtered_rpm = 0.0f;
+    runtime.last_target_rpm = 0.0f;
     runtime.last_pwm = 0.0f;
     runtime.last_error = 0.0f;
+    runtime.last_direction = 0;
+    runtime.drive_direction = 0;
+    runtime.last_output_saturated = false;
     runtime.csv_header_printed = false;
     runtime.completed = false;
     runtime.driver_ready = true;
@@ -364,23 +463,37 @@ bool n20ClosedLoopBenchInit(N20ClosedLoopBenchRuntime& runtime,
 
 void n20ClosedLoopBenchPrint(const N20ClosedLoopBenchRuntime& runtime,
                              uint32_t elapsed_ms,
-                             int32_t encoder_count) {
+                             const char* status) {
     if (!runtime.csv_header_printed) {
         Serial.println(
-            "timestamp_ms,target_ticks_per_sec,measured_ticks_per_sec,pwm,error,encoder_count,invalid_transitions");
+            "timestamp_ms,target_rpm,actual_rpm,error_rpm,pwm,direction,encoder_delta,status,raw_rpm,filtered_rpm,integral,output_saturated,bench_phase,invalid_transitions");
     }
 
     Serial.print(elapsed_ms);
     Serial.print(",");
-    Serial.print(runtime.last_target_ticks_per_sec, 3);
+    Serial.print(runtime.last_target_rpm, 3);
     Serial.print(",");
-    Serial.print(runtime.last_measured_ticks_per_sec, 3);
-    Serial.print(",");
-    Serial.print(runtime.last_pwm, 3);
+    Serial.print(runtime.last_filtered_rpm, 3);
     Serial.print(",");
     Serial.print(runtime.last_error, 3);
     Serial.print(",");
-    Serial.print(encoder_count);
+    Serial.print(runtime.last_pwm, 3);
+    Serial.print(",");
+    Serial.print(runtime.drive_direction);
+    Serial.print(",");
+    Serial.print(runtime.last_encoder_delta);
+    Serial.print(",");
+    Serial.print(status);
+    Serial.print(",");
+    Serial.print(runtime.last_raw_rpm, 3);
+    Serial.print(",");
+    Serial.print(runtime.last_filtered_rpm, 3);
+    Serial.print(",");
+    Serial.print(runtime.pid.integral, 3);
+    Serial.print(",");
+    Serial.print(runtime.last_output_saturated ? 1 : 0);
+    Serial.print(",");
+    Serial.print(elapsed_ms);
     Serial.print(",");
     Serial.println(n20EncoderBenchInvalidTransitionsSnapshot());
 }
@@ -388,8 +501,9 @@ void n20ClosedLoopBenchPrint(const N20ClosedLoopBenchRuntime& runtime,
 void serviceN20ClosedLoopBench(N20ClosedLoopBenchRuntime& runtime, uint32_t now_ms) {
     const N20ClosedLoopBenchConfig config = makeN20ClosedLoopBenchConfig();
 
-    if (config.control_period_ms == 0U) {
-        n20ClosedLoopBenchStop(runtime, "invalid control period");
+    if (!n20ClosedLoopBenchConfigValid(config)) {
+        n20ClosedLoopBenchStop(runtime, "invalid config");
+        runtime.completed = true;
         return;
     }
 
@@ -407,60 +521,124 @@ void serviceN20ClosedLoopBench(N20ClosedLoopBenchRuntime& runtime, uint32_t now_
 
     const uint32_t dt_ms = now_ms - runtime.last_control_ms;
     if (dt_ms == 0U) {
+        n20ClosedLoopBenchStop(runtime, "invalid dt");
+        runtime.completed = true;
+        return;
+    }
+
+    if (dt_ms > config.control_period_ms * 4U) {
+        n20ClosedLoopBenchStop(runtime, "control period overrun");
+        runtime.completed = true;
+        return;
+    }
+
+    const uint32_t elapsed_ms = now_ms - runtime.start_ms;
+    if (elapsed_ms >= config.max_duration_ms) {
+        n20ClosedLoopBenchStop(runtime, "max duration");
+        runtime.completed = true;
+        return;
+    }
+
+    if (n20EncoderBenchInvalidTransitionsSnapshot() >
+        config.max_invalid_encoder_transitions) {
+        n20ClosedLoopBenchStop(runtime, "encoder invalid transitions");
+        runtime.completed = true;
         return;
     }
 
     const int32_t encoder_count = n20EncoderBenchCountSnapshot();
-    const int32_t delta_count = encoder_count - runtime.last_encoder_count;
-    runtime.last_encoder_count = encoder_count;
     runtime.last_control_ms = now_ms;
-    const uint32_t elapsed_ms = now_ms - runtime.start_ms;
-    runtime.last_target_ticks_per_sec =
-        n20ClosedLoopBenchTargetForElapsedMs(config, elapsed_ms);
+    EncoderRpmEstimatorSample encoder_sample =
+        encoderRpmEstimatorUpdate(runtime.encoder, config.encoder, encoder_count, dt_ms);
 
-    runtime.last_measured_ticks_per_sec =
-        ((float)delta_count * 1000.0f) / (float)dt_ms;
-    if (config.invert_measured_ticks) {
-        runtime.last_measured_ticks_per_sec = -runtime.last_measured_ticks_per_sec;
+    if (config.invert_encoder_direction) {
+        encoder_sample.delta_count = -encoder_sample.delta_count;
+        encoder_sample.direction = (int8_t)-encoder_sample.direction;
+        encoder_sample.actual_rpm = -encoder_sample.actual_rpm;
+        encoder_sample.filtered_rpm = -encoder_sample.filtered_rpm;
     }
-    runtime.last_error =
-        runtime.last_target_ticks_per_sec - runtime.last_measured_ticks_per_sec;
+
+    runtime.last_encoder_delta = encoder_sample.delta_count;
+    runtime.last_raw_rpm = encoder_sample.actual_rpm;
+    runtime.last_filtered_rpm = encoder_sample.filtered_rpm;
+    runtime.last_target_rpm = clampTargetRpm(
+        n20ClosedLoopBenchTargetForElapsedMs(config, elapsed_ms),
+        config.max_target_rpm);
+    if (elapsed_ms >= config.profile_stop_ms) {
+        runtime.last_target_rpm = 0.0f;
+    }
+    runtime.last_error = runtime.last_target_rpm - runtime.last_filtered_rpm;
 
     float pwm = 0.0f;
-    if (runtime.last_target_ticks_per_sec == 0.0f) {
+    runtime.last_output_saturated = false;
+    const int8_t requested_direction = directionForTargetRpm(runtime.last_target_rpm);
+
+    if (requested_direction != 0 &&
+        runtime.last_direction != 0 &&
+        requested_direction != runtime.last_direction &&
+        now_ms >= runtime.direction_hold_until_ms) {
+        runtime.direction_hold_until_ms = now_ms + config.direction_change_coast_ms;
+        speedPidReset(runtime.pid);
+    }
+
+    const bool direction_hold_active = now_ms < runtime.direction_hold_until_ms;
+    const bool target_zero = runtime.last_target_rpm == 0.0f;
+    if (target_zero || direction_hold_active || !encoder_sample.valid) {
         speedPidReset(runtime.pid);
         runtime.tb6612.writeOutput(Tb6612Channel::kB, Tb6612OutputMode::kCoast, 0.0f);
+        runtime.tb6612.setStandby(false);
+        runtime.drive_direction = 0;
     } else {
         const SpeedPidOutput pid_output = speedPidUpdate(
             runtime.pid,
             config.pid,
-            runtime.last_target_ticks_per_sec,
-            runtime.last_measured_ticks_per_sec,
+            runtime.last_target_rpm,
+            runtime.last_filtered_rpm,
             dt_ms);
         pwm = clampFloat(pid_output.output,
                          -config.max_pwm,
                          config.max_pwm);
-        if ((runtime.last_target_ticks_per_sec > 0.0f && pwm < 0.0f) ||
-            (runtime.last_target_ticks_per_sec < 0.0f && pwm > 0.0f)) {
+        runtime.last_output_saturated = pid_output.saturated || pwm != pid_output.output;
+
+        if ((runtime.last_target_rpm > 0.0f && pwm < 0.0f) ||
+            (runtime.last_target_rpm < 0.0f && pwm > 0.0f) ||
+            fabsf(runtime.last_error) <= config.deadband_rpm) {
             pwm = 0.0f;
         }
+
+        if (pwm != 0.0f && fabsf(pwm) < config.min_effective_pwm) {
+            pwm = (pwm > 0.0f) ? config.min_effective_pwm : -config.min_effective_pwm;
+        }
+
+        runtime.tb6612.setStandby(true);
         if (!runtime.tb6612.writeDuty(Tb6612Channel::kB, pwm)) {
             n20ClosedLoopBenchStop(runtime, "TB6612 writeDuty failed");
+            runtime.completed = true;
             return;
         }
+        runtime.drive_direction = directionForTargetRpm(pwm);
     }
 
     runtime.last_pwm = pwm;
+    runtime.last_direction = requested_direction;
 
     if (runtime.last_print_ms == 0U ||
         isIntervalDue(now_ms, runtime.last_print_ms, config.print_interval_ms)) {
         runtime.last_print_ms = now_ms;
-        n20ClosedLoopBenchPrint(runtime, elapsed_ms, encoder_count);
+        const char* status = "run";
+        if (target_zero) {
+            status = "stop";
+        } else if (direction_hold_active) {
+            status = "direction_hold";
+        } else if (!encoder_sample.valid) {
+            status = "encoder_warmup";
+        }
+        n20ClosedLoopBenchPrint(runtime, elapsed_ms, status);
         runtime.csv_header_printed = true;
     }
 
-    if (elapsed_ms >= config.profile_step5_start_ms &&
-        runtime.last_target_ticks_per_sec == 0.0f) {
+    if (elapsed_ms >= config.profile_stop_ms &&
+        runtime.last_target_rpm == 0.0f) {
         runtime.tb6612.writeOutput(Tb6612Channel::kB, Tb6612OutputMode::kCoast, 0.0f);
         runtime.tb6612.setStandby(false);
         stopN20EncoderBench();
@@ -914,6 +1092,10 @@ void handleMotorCmd(const char* payload) {
     const float target_rpm = command.has_target_rpm ? command.target_rpm : 0.0f;
     const float max_pwm = command.has_max_pwm ? command.max_pwm : 0.0f;
     const uint32_t timeout_ms = command.has_timeout_ms ? command.timeout_ms : 0U;
+    const bool hardware_enable =
+        command.has_hardware_enable ? command.hardware_enable : (enabled && !stop_requested);
+
+    motorControllerSetHardwareOutputsEnabled(hardware_enable);
 
     motorSharedSetMotorCmd(
         target_rpm,
@@ -939,7 +1121,9 @@ void handleMotorCmd(const char* payload) {
     Serial.print(" timeout_ms=");
     Serial.print(timeout_ms);
     Serial.print(" stop=");
-    Serial.println(stop_requested ? 1 : 0);
+    Serial.print(stop_requested ? 1 : 0);
+    Serial.print(" hw_enable=");
+    Serial.println(hardware_enable ? 1 : 0);
     last_motor_cmd_debug_ms = millis();
 }
 
@@ -1093,12 +1277,28 @@ void motorControlTask(void* /*arg*/) {
     uint32_t loop_count = 0;
     MotorControllerRuntime motor_runtime;
     N20ClosedLoopBenchRuntime closed_loop_bench_runtime = {};
+    SingleMotorControlRuntime single_motor_runtime = {};
+    EncoderRpmEstimatorRuntime motor_encoder_runtime = {};
+    const DashboardMotorClosedLoopConfig dashboard_motor_config =
+        makeDashboardMotorClosedLoopConfig();
+    uint32_t motor_last_control_ms = 0U;
     motorControllerInit(motor_runtime);
+    singleMotorControlInit(single_motor_runtime);
+    encoderRpmEstimatorInit(motor_encoder_runtime);
 
     Serial.print("motor_control_task started on core ");
     Serial.println(xPortGetCoreID());
     runTb6612ChannelABenchTest();
     runTb6612ChannelBBenchTest();
+    if (!app_config::kEnableN20ClosedLoopBench) {
+        startN20EncoderBench();
+        encoderRpmEstimatorUpdate(
+            motor_encoder_runtime,
+            dashboard_motor_config.encoder,
+            n20EncoderBenchCountSnapshot(),
+            app_config::kMotorControlTaskPeriodMs);
+        motor_last_control_ms = millis();
+    }
 
     for (;;) {
         esp_task_wdt_reset();
@@ -1110,8 +1310,40 @@ void motorControlTask(void* /*arg*/) {
             serviceN20ClosedLoopBench(closed_loop_bench_runtime, now_ms);
         } else {
             const MotorControlCommandSnapshot command = motorSharedGetCommand();
-            const MotorControlStateSnapshot state =
-                motorControllerUpdateMock(motor_runtime, command, now_ms, loop_count);
+            uint32_t dt_ms =
+                motor_last_control_ms == 0U
+                    ? app_config::kMotorControlTaskPeriodMs
+                    : now_ms - motor_last_control_ms;
+            if (dt_ms == 0U) {
+                dt_ms = app_config::kMotorControlTaskPeriodMs;
+            }
+            motor_last_control_ms = now_ms;
+
+            EncoderRpmEstimatorSample encoder_sample =
+                encoderRpmEstimatorUpdate(
+                    motor_encoder_runtime,
+                    dashboard_motor_config.encoder,
+                    n20EncoderBenchCountSnapshot(),
+                    dt_ms);
+            if (dashboard_motor_config.invert_encoder_direction) {
+                encoder_sample.delta_count = -encoder_sample.delta_count;
+                encoder_sample.direction = (int8_t)-encoder_sample.direction;
+                encoder_sample.actual_rpm = -encoder_sample.actual_rpm;
+                encoder_sample.filtered_rpm = -encoder_sample.filtered_rpm;
+            }
+
+            const bool hardware_outputs_enabled = motorControllerHardwareOutputsEnabled();
+            MotorControlStateSnapshot state =
+                singleMotorControlUpdate(
+                    single_motor_runtime,
+                    dashboard_motor_config.control,
+                    command,
+                    encoder_sample.filtered_rpm,
+                    encoder_sample.valid && hardware_outputs_enabled,
+                    now_ms,
+                    dt_ms,
+                    loop_count);
+            state.hardware_outputs_enabled = motorControllerHardwareOutputsEnabled();
 
             motorControllerApplyHardwareOutputs(state);
             motorSharedSetState(state);

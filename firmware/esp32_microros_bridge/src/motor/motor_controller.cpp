@@ -8,6 +8,13 @@ namespace {
 Tb6612Driver g_motor_driver;
 bool g_motor_driver_attempted = false;
 bool g_motor_driver_ready = false;
+volatile bool g_runtime_motor_hardware_outputs_enabled =
+    app_config::kEnableMotorHardwareOutputs;
+
+bool motorHardwareOutputsAllowed() {
+    return app_config::kEnableMotorHardwareOutputs ||
+        g_runtime_motor_hardware_outputs_enabled;
+}
 
 Tb6612DriverConfig makeMotorHardwareDriverConfig() {
     Tb6612DriverConfig config = tb6612MakeUnsetDriverConfig();
@@ -25,7 +32,7 @@ Tb6612DriverConfig makeMotorHardwareDriverConfig() {
 }
 
 bool ensureMotorHardwareReady() {
-    if (!app_config::kEnableMotorHardwareOutputs) {
+    if (!motorHardwareOutputsAllowed()) {
         return false;
     }
 
@@ -56,6 +63,26 @@ MotorResponseModelConfig makeMotorResponseModelConfig() {
 }
 
 }  // namespace
+
+void motorControllerSetHardwareOutputsEnabled(bool enabled) {
+    g_runtime_motor_hardware_outputs_enabled = enabled;
+
+    if (!enabled) {
+        if (g_motor_driver_ready) {
+            g_motor_driver.writeOutput(Tb6612Channel::kB, Tb6612OutputMode::kCoast, 0.0f);
+            g_motor_driver.setStandby(false);
+        }
+        return;
+    }
+
+    if (!g_motor_driver_ready) {
+        g_motor_driver_attempted = false;
+    }
+}
+
+bool motorControllerHardwareOutputsEnabled() {
+    return motorHardwareOutputsAllowed();
+}
 
 void motorControllerInit(MotorControllerRuntime& runtime) {
     motorResponseModelInit(runtime.response_model);
