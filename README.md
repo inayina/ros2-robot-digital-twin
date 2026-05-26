@@ -33,6 +33,7 @@ docs/
   dashboard-integration.md  # dashboard / backend 集成边界
   motor_dashboard_interface.md # 电机状态/控制接口契约
   motor_dashboard_progress_2026_05_20.md # 当前联调进度与阻塞
+  motor_closed_loop_tuning_process.md # N20 单电机闭环调参过程记录
   robot_ops_dashboard_handoff.md # 给 robot-ops-dashboard 的对接说明
   pre_n20_regression_check.md # N20 接入前通信负载回归检查
 ```

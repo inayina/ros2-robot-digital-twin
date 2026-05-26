@@ -20,7 +20,10 @@ def test_normalize_motor_status_payload_adds_dashboard_aliases():
         (
             '{"target_rpm":120.0,"actual_rpm":118.5,"error_rpm":1.5,'
             '"pwm_duty":0.4,"control_enabled":1,"closed_loop":1,'
-            '"fault":0,"timeout":0,"estop":0,"source":"target_rpm","loop":42}'
+            '"fault":0,"timeout":0,"estop":0,"source":"target_rpm","loop":42,'
+            '"timestamp_ms":123456,"publish_ms":123460,"sample_age_ms":4,'
+            '"abs_error_rpm":1.5,"pwm_ratio":0.8,"direction":1,'
+            '"saturated":1,"hardware_outputs_enabled":1,"numeric_valid":1}'
         ),
         robot_id='amr-test',
         ros_topic='/motor/status')
@@ -32,6 +35,16 @@ def test_normalize_motor_status_payload_adds_dashboard_aliases():
     assert payload['enabled'] is True
     assert payload['closed_loop'] is True
     assert payload['fault'] is False
+    assert payload['timestamp_ms'] == 123456
+    assert payload['publish_ms'] == 123460
+    assert payload['sample_age_ms'] == 4
+    assert payload['abs_error_rpm'] == 1.5
+    assert payload['pwm_ratio'] == 0.8
+    assert payload['direction'] == 1
+    assert payload['saturated'] is True
+    assert payload['output_saturated'] is True
+    assert payload['hardware_outputs_enabled'] is True
+    assert payload['numeric_valid'] is True
     assert payload['motor_state']['control_enabled'] == 1
     assert payload['motor_state']['loop'] == 42
 

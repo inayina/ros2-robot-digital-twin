@@ -92,6 +92,16 @@ def normalize_motor_status_payload(
     estop = _first_bool(parsed, ('estop', 'estop_active', 'stop'))
     command_timeout_ms = _first_number(parsed, ('command_timeout_ms', 'timeout_ms'))
     max_pwm = _first_number(parsed, ('max_pwm',))
+    timestamp_ms = _first_number(parsed, ('timestamp_ms', 'updated_ms'))
+    publish_ms = _first_number(parsed, ('publish_ms',))
+    sample_age_ms = _first_number(parsed, ('sample_age_ms',))
+    abs_error_rpm = _first_number(parsed, ('abs_error_rpm',))
+    pwm_ratio = _first_number(parsed, ('pwm_ratio',))
+    direction = _first_number(parsed, ('direction',))
+    saturated = _first_bool(parsed, ('saturated', 'output_saturated'))
+    hardware_outputs_enabled = _first_bool(
+        parsed, ('hardware_outputs_enabled',))
+    numeric_valid = _first_bool(parsed, ('numeric_valid',))
 
     motor_state = dict(parsed)
     if measured_rpm is not None and 'actual_rpm' not in motor_state:
@@ -137,6 +147,25 @@ def normalize_motor_status_payload(
         payload['loop'] = parsed['loop']
     if 'source' in parsed:
         payload['active_source'] = parsed['source']
+    if timestamp_ms is not None:
+        payload['timestamp_ms'] = int(timestamp_ms)
+    if publish_ms is not None:
+        payload['publish_ms'] = int(publish_ms)
+    if sample_age_ms is not None:
+        payload['sample_age_ms'] = int(sample_age_ms)
+    if abs_error_rpm is not None:
+        payload['abs_error_rpm'] = abs_error_rpm
+    if pwm_ratio is not None:
+        payload['pwm_ratio'] = pwm_ratio
+    if direction is not None:
+        payload['direction'] = int(direction)
+    if saturated is not None:
+        payload['saturated'] = saturated
+        payload['output_saturated'] = saturated
+    if hardware_outputs_enabled is not None:
+        payload['hardware_outputs_enabled'] = hardware_outputs_enabled
+    if numeric_valid is not None:
+        payload['numeric_valid'] = numeric_valid
     if max_pwm is not None:
         payload['max_pwm'] = max_pwm
     if command_timeout_ms is not None:

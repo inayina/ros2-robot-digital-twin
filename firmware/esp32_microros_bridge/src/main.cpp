@@ -105,6 +105,23 @@ struct N20ClosedLoopBenchRuntime {
     bool driver_ready;
 };
 
+struct N20OpenLoopSweepRuntime {
+    Tb6612Driver tb6612;
+    EncoderRpmEstimatorRuntime encoder;
+    uint32_t start_ms;
+    uint32_t last_sample_ms;
+    uint32_t last_print_ms;
+    int32_t last_encoder_delta;
+    int32_t last_encoder_count;
+    float last_raw_rpm;
+    float last_filtered_rpm;
+    float last_pwm;
+    bool csv_header_printed;
+    bool completed;
+    bool initialized;
+    bool driver_ready;
+};
+
 struct DashboardMotorClosedLoopConfig {
     EncoderRpmEstimatorConfig encoder;
     SingleMotorControlConfig control;
@@ -381,6 +398,198 @@ bool n20ClosedLoopBenchConfigValid(const N20ClosedLoopBenchConfig& config) {
         config.min_effective_pwm >= 0.0f &&
         config.min_effective_pwm <= config.max_pwm &&
         config.profile_stop_ms <= config.max_duration_ms;
+}
+
+const float* n20OpenLoopSweepPwmSteps(size_t& step_count) {
+    static const float kSteps[] = {
+        app_config::kN20OpenLoopSweepPwm0,
+        app_config::kN20OpenLoopSweepPwm1,
+        app_config::kN20OpenLoopSweepPwm2,
+        app_config::kN20OpenLoopSweepPwm3,
+        app_config::kN20OpenLoopSweepPwm4,
+        app_config::kN20OpenLoopSweepPwm5,
+        app_config::kN20OpenLoopSweepPwm6,
+    };
+    step_count = sizeof(kSteps) / sizeof(kSteps[0]);
+    return kSteps;
+}
+
+void n20OpenLoopSweepStop(N20OpenLoopSweepRuntime& runtime, const char* reason) {
+    if (reason != nullptr && reason[0] != '\0') {
+        Serial.print("[N20_OPEN_LOOP_SWEEP] stop: ");
+        Serial.println(reason);
+    }
+
+    if (runtime.driver_ready) {
+        runtime.tb6612.writeOutput(Tb6612Channel::kB, Tb6612OutputMode::kCoast, 0.0f);
+        runtime.tb6612.setStandby(false);
+    }
+
+    stopN20EncoderBench();
+    encoderRpmEstimatorInit(runtime.encoder);
+    runtime.start_ms = 0U;
+    runtime.last_sample_ms = 0U;
+    runtime.last_print_ms = 0U;
+    runtime.last_encoder_delta = 0;
+    runtime.last_encoder_count = 0;
+    runtime.last_raw_rpm = 0.0f;
+    runtime.last_filtered_rpm = 0.0f;
+    runtime.last_pwm = 0.0f;
+    runtime.driver_ready = false;
+    runtime.initialized = false;
+}
+
+bool n20OpenLoopSweepInit(N20OpenLoopSweepRuntime& runtime, uint32_t now_ms) {
+    if (runtime.initialized) {
+        return runtime.driver_ready;
+    }
+
+    runtime = {};
+    encoderRpmEstimatorInit(runtime.encoder);
+
+    if (!runtime.tb6612.begin(makeTb6612ChannelBBenchConfig())) {
+        Serial.println("[N20_OPEN_LOOP_SWEEP] TB6612 B init failed");
+        return false;
+    }
+
+    runtime.tb6612.writeOutput(Tb6612Channel::kB, Tb6612OutputMode::kCoast, 0.0f);
+    runtime.tb6612.setStandby(false);
+
+    startN20EncoderBench();
+    EncoderRpmEstimatorConfig encoder_config = {};
+    encoder_config.counts_per_output_rev =
+        app_config::kN20ClosedLoopBenchEncoderPulsesPerRev *
+        app_config::kN20ClosedLoopBenchGearRatio *
+        app_config::kN20ClosedLoopBenchEdgesPerPulse;
+    encoder_config.filter_alpha = app_config::kN20ClosedLoopBenchEncoderFilterAlpha;
+    encoderRpmEstimatorUpdate(
+        runtime.encoder,
+        encoder_config,
+        n20EncoderBenchCountSnapshot(),
+        app_config::kN20OpenLoopSweepPrintIntervalMs);
+
+    runtime.start_ms = now_ms;
+    runtime.last_sample_ms = now_ms;
+    runtime.last_print_ms = 0U;
+    runtime.last_encoder_count = n20EncoderBenchCountSnapshot();
+    runtime.csv_header_printed = false;
+    runtime.completed = false;
+    runtime.driver_ready = true;
+    runtime.initialized = true;
+
+    Serial.print("[N20_OPEN_LOOP_SWEEP] enabled step_ms=");
+    Serial.println(app_config::kN20OpenLoopSweepStepMs);
+    return true;
+}
+
+void n20OpenLoopSweepPrint(const N20OpenLoopSweepRuntime& runtime,
+                           uint32_t elapsed_ms,
+                           const char* status) {
+    if (!runtime.csv_header_printed) {
+        Serial.println(
+            "timestamp_ms,mode,pwm,actual_rpm,raw_rpm,filtered_rpm,encoder_delta,encoder_count,invalid_transitions,direction,status");
+    }
+
+    Serial.print(elapsed_ms);
+    Serial.print(",open_loop,");
+    Serial.print(runtime.last_pwm, 3);
+    Serial.print(",");
+    Serial.print(runtime.last_filtered_rpm, 3);
+    Serial.print(",");
+    Serial.print(runtime.last_raw_rpm, 3);
+    Serial.print(",");
+    Serial.print(runtime.last_filtered_rpm, 3);
+    Serial.print(",");
+    Serial.print(runtime.last_encoder_delta);
+    Serial.print(",");
+    Serial.print(runtime.last_encoder_count);
+    Serial.print(",");
+    Serial.print(n20EncoderBenchInvalidTransitionsSnapshot());
+    Serial.print(",1,");
+    Serial.println(status);
+}
+
+void serviceN20OpenLoopSweep(N20OpenLoopSweepRuntime& runtime, uint32_t now_ms) {
+    size_t step_count = 0U;
+    const float* steps = n20OpenLoopSweepPwmSteps(step_count);
+    const uint32_t max_duration_ms =
+        app_config::kN20OpenLoopSweepStepMs * (uint32_t)step_count;
+
+    if (runtime.completed) {
+        return;
+    }
+
+    if (step_count == 0U || app_config::kN20OpenLoopSweepStepMs == 0U) {
+        n20OpenLoopSweepStop(runtime, "invalid config");
+        runtime.completed = true;
+        return;
+    }
+
+    if (!n20OpenLoopSweepInit(runtime, now_ms)) {
+        return;
+    }
+
+    const uint32_t elapsed_ms = now_ms - runtime.start_ms;
+    if (elapsed_ms >= max_duration_ms) {
+        n20OpenLoopSweepStop(runtime, "complete");
+        runtime.completed = true;
+        Serial.println("[N20_OPEN_LOOP_SWEEP] profile complete");
+        return;
+    }
+
+    const uint32_t step_index = elapsed_ms / app_config::kN20OpenLoopSweepStepMs;
+    const float pwm = steps[step_index];
+    runtime.tb6612.setStandby(true);
+    if (!runtime.tb6612.writeDuty(Tb6612Channel::kB, pwm)) {
+        n20OpenLoopSweepStop(runtime, "TB6612 writeDuty failed");
+        runtime.completed = true;
+        return;
+    }
+    runtime.last_pwm = pwm;
+
+    if (!isIntervalDue(now_ms,
+                       runtime.last_sample_ms,
+                       app_config::kN20OpenLoopSweepPrintIntervalMs)) {
+        return;
+    }
+
+    const uint32_t dt_ms = now_ms - runtime.last_sample_ms;
+    runtime.last_sample_ms = now_ms;
+
+    EncoderRpmEstimatorConfig encoder_config = {};
+    encoder_config.counts_per_output_rev =
+        app_config::kN20ClosedLoopBenchEncoderPulsesPerRev *
+        app_config::kN20ClosedLoopBenchGearRatio *
+        app_config::kN20ClosedLoopBenchEdgesPerPulse;
+    encoder_config.filter_alpha = app_config::kN20ClosedLoopBenchEncoderFilterAlpha;
+
+    EncoderRpmEstimatorSample encoder_sample =
+        encoderRpmEstimatorUpdate(
+            runtime.encoder,
+            encoder_config,
+            n20EncoderBenchCountSnapshot(),
+            dt_ms);
+    if (app_config::kN20ClosedLoopBenchInvertEncoderDirection) {
+        encoder_sample.delta_count = -encoder_sample.delta_count;
+        encoder_sample.direction = (int8_t)-encoder_sample.direction;
+        encoder_sample.actual_rpm = -encoder_sample.actual_rpm;
+        encoder_sample.filtered_rpm = -encoder_sample.filtered_rpm;
+    }
+
+    runtime.last_encoder_delta = encoder_sample.delta_count;
+    runtime.last_encoder_count = encoder_sample.encoder_count;
+    runtime.last_raw_rpm = encoder_sample.actual_rpm;
+    runtime.last_filtered_rpm = encoder_sample.filtered_rpm;
+
+    if (runtime.last_print_ms == 0U ||
+        isIntervalDue(now_ms, runtime.last_print_ms, app_config::kN20OpenLoopSweepPrintIntervalMs)) {
+        runtime.last_print_ms = now_ms;
+        n20OpenLoopSweepPrint(
+            runtime,
+            elapsed_ms,
+            encoder_sample.valid ? "run" : "encoder_warmup");
+        runtime.csv_header_printed = true;
+    }
 }
 
 void n20ClosedLoopBenchStop(N20ClosedLoopBenchRuntime& runtime, const char* reason) {
@@ -1276,6 +1485,7 @@ void motorControlTask(void* /*arg*/) {
     TickType_t last_wake_time = xTaskGetTickCount();
     uint32_t loop_count = 0;
     MotorControllerRuntime motor_runtime;
+    N20OpenLoopSweepRuntime open_loop_sweep_runtime = {};
     N20ClosedLoopBenchRuntime closed_loop_bench_runtime = {};
     SingleMotorControlRuntime single_motor_runtime = {};
     EncoderRpmEstimatorRuntime motor_encoder_runtime = {};
@@ -1290,7 +1500,8 @@ void motorControlTask(void* /*arg*/) {
     Serial.println(xPortGetCoreID());
     runTb6612ChannelABenchTest();
     runTb6612ChannelBBenchTest();
-    if (!app_config::kEnableN20ClosedLoopBench) {
+    if (!app_config::kEnableN20ClosedLoopBench &&
+        !app_config::kEnableN20OpenLoopPwmSweep) {
         startN20EncoderBench();
         encoderRpmEstimatorUpdate(
             motor_encoder_runtime,
@@ -1306,7 +1517,9 @@ void motorControlTask(void* /*arg*/) {
         loop_count++;
 
         const uint32_t now_ms = millis();
-        if (app_config::kEnableN20ClosedLoopBench) {
+        if (app_config::kEnableN20OpenLoopPwmSweep) {
+            serviceN20OpenLoopSweep(open_loop_sweep_runtime, now_ms);
+        } else if (app_config::kEnableN20ClosedLoopBench) {
             serviceN20ClosedLoopBench(closed_loop_bench_runtime, now_ms);
         } else {
             const MotorControlCommandSnapshot command = motorSharedGetCommand();

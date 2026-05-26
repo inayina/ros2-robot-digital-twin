@@ -74,6 +74,14 @@ bridge 会保留 ESP32 原始字段，并补充 dashboard 常用字段：
 - `error_rpm`
 - `pwm`
 - `pwm_duty`
+- `timestamp_ms`
+- `publish_ms`
+- `sample_age_ms`
+- `abs_error_rpm`
+- `pwm_ratio`
+- `direction`
+- `saturated`
+- `output_saturated`
 - `enabled`
 - `control_enabled`
 - `closed_loop`

@@ -23,7 +23,7 @@ static sensor_msgs__msg__Imu filtered_imu_msg;
 static std_msgs__msg__Int32 state_msg;
 static std_msgs__msg__Float32 motor_actual_rpm_msg;
 static std_msgs__msg__String motor_state_msg;
-static char motor_state_buffer[384];
+static char motor_state_buffer[768];
 
 static bool initialized = false;
 static bool imu_publisher_initialized = false;
@@ -70,6 +70,10 @@ static void recordPublishResult(const char* topic,
     if (rcl_error_is_set()) {
         rcl_reset_error();
     }
+}
+
+static float finiteOrZero(float value) {
+    return isfinite(value) ? value : 0.0f;
 }
 
 static void fillImuMessage(sensor_msgs__msg__Imu& msg,
@@ -397,24 +401,37 @@ void urosPubPublishMotorState(const MotorControlStateSnapshot& state) {
     const int closed_loop = state.closed_loop ? 1 : 0;
     const int hardware_outputs_enabled = state.hardware_outputs_enabled ? 1 : 0;
     const char* status = fault ? "fault" : estop ? "stopped" : timeout ? "stale" : "ok";
+    const unsigned long publish_ms = millis();
+    const unsigned long timestamp_ms = (unsigned long)state.updated_ms;
+    const float target_rpm = finiteOrZero(state.target_rpm);
+    const float actual_rpm = finiteOrZero(state.actual_rpm);
+    const float error_rpm = finiteOrZero(state.error_rpm);
+    const float pwm_duty = finiteOrZero(state.pwm_duty);
+    const float max_pwm = finiteOrZero(state.max_pwm_limit);
+    const float pwm_ratio = (max_pwm > 0.0001f) ? (pwm_duty / max_pwm) : 0.0f;
 
     const int len = snprintf(
         motor_state_buffer,
         sizeof(motor_state_buffer),
-        "{\"status\":\"%s\",\"target_rpm\":%.3f,\"actual_rpm\":%.3f,\"error_rpm\":%.3f,"
-        "\"measured_rpm\":%.3f,\"pwm_duty\":%.3f,\"pwm\":%.3f,"
-        "\"max_pwm\":%.3f,\"command_timeout_ms\":%lu,\"direction\":%d,"
+        "{\"schema_version\":1,\"status\":\"%s\","
+        "\"timestamp_ms\":%lu,\"publish_ms\":%lu,"
+        "\"target_rpm\":%.3f,\"actual_rpm\":%.3f,\"measured_rpm\":%.3f,"
+        "\"error_rpm\":%.3f,\"pwm\":%.3f,"
+        "\"max_pwm\":%.3f,\"pwm_ratio\":%.3f,\"timeout_ms\":%lu,\"direction\":%d,"
         "\"control_enabled\":%d,\"enabled\":%d,\"hardware_outputs_enabled\":%d,"
         "\"closed_loop\":%d,\"saturated\":%d,\"timeout\":%d,"
-        "\"stop\":%d,\"estop\":%d,\"fault\":%d,\"source\":\"%s\",\"loop\":%lu}",
+        "\"stop\":%d,\"fault\":%d,"
+        "\"source\":\"%s\",\"loop\":%lu}",
         status,
-        state.target_rpm,
-        state.actual_rpm,
-        state.error_rpm,
-        state.actual_rpm,
-        state.pwm_duty,
-        state.pwm_duty,
-        state.max_pwm_limit,
+        timestamp_ms,
+        publish_ms,
+        target_rpm,
+        actual_rpm,
+        actual_rpm,
+        error_rpm,
+        pwm_duty,
+        max_pwm,
+        pwm_ratio,
         (unsigned long)state.command_timeout_ms,
         (int)state.direction,
         enabled,
@@ -423,7 +440,6 @@ void urosPubPublishMotorState(const MotorControlStateSnapshot& state) {
         closed_loop,
         state.saturated ? 1 : 0,
         timeout,
-        estop,
         estop,
         fault,
         motorCommandSourceName(state.active_source),
