@@ -1,5 +1,7 @@
 # Data Flow
 
+> New canonical dashboard-facing dataflow document: [dataflow.md](dataflow.md). This file is kept for existing links and older notes.
+
 ## End-to-End Overview
 
 本仓库已经做过一轮 dashboard 联调。当前对外说明不再按“监控优先”组织，而是按访问形态收口为 `2` 条交互链路和 `1` 条只读链路：
